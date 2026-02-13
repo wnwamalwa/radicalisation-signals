@@ -1,0 +1,170 @@
+/* Reduce navbar height by decreasing vertical padding */
+.navbar {
+  padding-top: 0.25rem;  /* default is ~0.5–1rem */
+  padding-bottom: 0.25rem;
+  min-height: 67px;      /* optional hard min-height */
+}
+
+/* Also shrink the link padding so they take up less height */
+.nav-link {
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+
+/* Keep your existing styles */
+.navbar-brand {
+  font-size: 1.5rem;
+}
+
+/* Hide the blinking cursor in the selectize input fields */
+.selectize-input > input {
+  caret-color: transparent !important;
+}
+
+.my-radio > label {
+  color: gray;
+  font-style: italic;
+  font-size: 0.9em;
+}
+
+.full-height-box {
+  height: 100%;
+  min-height: 260px; /* Adjust as needed */
+  display: flex;
+  flex-direction: column;
+  justify-content: stretch;
+}
+
+
+
+.bslib-value-box .responsive-vb-title,
+.responsive-vb-title {
+  display: inline-block !important;
+  font-weight: 800 !important;
+  white-space: nowrap !important;
+  transform-origin: left center !important;
+  transform: scale(1) !important;
+  width: max-content !important;
+  overflow: visible !important;
+  font-size: 1.9rem !important; /* Increased title size */
+  line-height: 0.9 !important;
+}
+.responsive-text-container {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+.extra-responsive-text {
+  display: inline-block;
+  font-weight: 700;
+  color: #ffffff;
+  white-space: nowrap;
+  padding: 0.05rem 0.05rem;
+  box-sizing: border-box;
+  font-size: 5rem;
+  transform-origin: left center;
+  transform: scale(1);
+  width: max-content;
+}
+
+.responsive-vb-subtitle-text {
+  display: inline-block;
+  font-weight: 700;
+  color: #ffffff;
+  white-space: nowrap;
+  padding: 0rem 0rem;
+  box-sizing: border-box;
+  font-size: 1.2rem;
+  transform-origin: left center;
+  transform: scale(1);
+  width: max-content;
+}
+
+.very-green-box {
+  background-color: #006400 !important;   /* Dark green */
+  color: #ffffff !important;              /* White text for contrast */
+  border: 3px solid #00FF00;              /* Bright green border */
+  border-radius: 20px;                    /* Smooth rounded corners */
+  box-shadow: 0 0 20px rgba(0, 255, 0, 0.7); /* Green glowing effect */
+}
+
+.very-green-box .value-box-title,
+.very-green-box .responsive-text-container,
+.very-green-box p {
+  color: #eaffea !important; /* Softer greenish white text */
+}
+
+/* Dynamic inputs container */
+.dynamic-inputs {
+  padding: 0.01rem 0.025rem 0.0075rem;
+  margin-top: 0%;
+  margin-bottom: 0%;
+}
+
+/* Growth output container */
+.growth-output {
+  text-align: center;
+  font-size: 1.2em;
+  font-weight: bold;
+  padding: 0%;
+  margin-top: -10%;
+  margin-bottom: -0.2%;
+}
+
+/* Custom horizontal rule */
+.custom-hr {
+  padding: 0rem;
+  margin-top: 0%;
+  margin-bottom: 0%;
+}
+
+/* Button bar container */
+.button-bar {
+  display: flex;
+  justify-content: center;
+  padding: 3%;
+  gap: 7%;
+  margin-top: 0rem;
+  margin-bottom: 0rem;
+}
+
+
+# styles.css
+.card-header {
+  background-color: lime !important;
+  min-height: .75rem;      /* just a thin strip */
+  padding: 0 !important;
+}
+
+/* Twitter */
+.btn-twitter {
+  color: #1DA1F2;
+}
+.btn-twitter:hover {
+  background-color: #1DA1F2;
+  color: white;
+  box-shadow: 0 0 10px #1DA1F2;
+}
+
+/* Add to www/styles.css */
+@media (max-width: 768px) {
+  .responsive-vb-title {
+    font-size: 1.2rem !important;
+  }
+
+  .extra-responsive-text {
+    font-size: 1.5rem !important;
+  }
+
+  .sidebar {
+    width: 100% !important;
+  }
+}
+
+

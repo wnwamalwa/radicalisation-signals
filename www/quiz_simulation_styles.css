@@ -1,0 +1,183 @@
+/* ============================================================
+   QUIZ-SIM PAGE — SAME LAYOUT BEHAVIOR AS AI ASSISTANT
+   ============================================================ */
+
+/* Hide default left sidebar on quiz-sim tab */
+body[data-page="quiz-sim"] .desktop-left-sidebar {
+  display: none !important;
+  width: 0 !important;
+}
+
+/* Make main layout full width */
+body[data-page="quiz-sim"] .main-content {
+  margin-left: 0 !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  padding: 20 !important;
+   margin-top: -55 !important;
+}
+
+/* Outer layout identical to AI assistant */
+.quiz-sim-layout {
+  display: flex;
+  gap: 20px;
+  height: calc(100vh - 120px);
+  padding: 15px;
+  padding-top: 70px;
+  width: 100%;
+  align-items: flex-start;
+}
+
+/* Sidebar identical proportions to AI Assistant */
+.quiz-sim-sidebar {
+  width: 450px;
+  min-width: 450px;
+  max-width: 450px;
+  background: linear-gradient(135deg, #fef3e7 0%, #fce4d8 100%);
+border-radius: 20px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+  padding: 34px;
+  padding-top: 44px;
+  overflow-y: auto;
+  flex-shrink: 0;
+  height: fit-content;
+  max-height: calc(100vh - 140px);
+  border: 1px solid rgba(255,255,255,0.08);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.quiz-sim-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #d35400;
+  margin-bottom: 20px;
+  text-align: center;
+}
+
+.quiz-sim-radio-group .radio {
+  margin-bottom: 12px;
+  padding: 12px;
+  background: white;
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.quiz-sim-radio-group .radio:hover {
+  background: #fff0e0;
+  transform: translateX(5px);
+}
+
+/* Main panel identical to AI Assistant */
+.quiz-sim-main {
+  flex: 1;
+  background: white;
+  border-radius: 16px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  padding: 30px;
+   padding-top: -40px;
+  overflow-y: auto;
+  max-height: calc(100vh - 160px);
+  width: 100%;
+}
+
+/* Section card like AI Assistant */
+.quiz-sim-section {
+  background: white;
+  padding: 20px;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+}
+
+/* Reduce gap ONLY between the first and second slider */
+#sim_years + .form-group > .irs--shiny,
+#sim_years ~ .form-group:nth-of-type(2) > .irs--shiny {
+  margin-top: -8px !important;   /* Pulls the second slider up */
+}
+
+/* Optional: also tighten the label spacing */
+#sim_years + .form-group .control-label,
+#sim_years ~ .form-group:nth-of-type(2) .control-label {
+  margin-bottom: 4px !important;
+}
+
+/* Keep normal spacing for all sliders after the second one */
+#sim_years ~ .form-group:nth-of-type(n+3) > .irs--shiny {
+  margin-top: 20px !important;
+}
+
+/* AI Assistant Layout */
+.ai-assistant-layout {
+  display: flex;
+  gap: 1.5rem;
+  height: calc(100vh - 120px);
+  padding: 20px;
+}
+
+.ai-assistant-sidebar {
+  width: 320px;
+  background: white;
+  border-radius: 14px;
+  padding: 20px;
+  overflow-y: auto;
+  box-shadow: 0 0 15px rgba(0,0,0,0.05);
+}
+
+.ai-assistant-main {
+  flex: 1;
+  background: white;
+  border-radius: 14px;
+  padding: 25px;
+  overflow-y: auto;
+  box-shadow: 0 0 15px rgba(0,0,0,0.05);
+}
+
+.ai-sidebar-title {
+  color: #00A652;
+  font-weight: 700;
+  margin-bottom: 15px;
+}
+
+.ai-radio-group .radio {
+  margin-bottom: 10px;
+}
+
+.ai-radio-group label {
+  font-weight: 500;
+  color: #374151;
+}
+
+.ai-submit-btn {
+  background: #00A652 !important;
+  color: white !important;
+  border: none !important;
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-weight: 600;
+  width: 100%;
+  margin-top: 10px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.ai-submit-btn:hover {
+  background: #008a45 !important;
+  box-shadow: 0 4px 12px rgba(0, 166, 82, 0.3);
+}
+
+/* Response styling */
+.ai-response-box {
+  background: #f9fafb;
+  border-left: 4px solid #00A652;
+  padding: 15px;
+  border-radius: 8px;
+  margin-top: 20px;
+}
+
+.ai-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #6b7280;
+  font-style: italic;
+}

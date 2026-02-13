@@ -1,0 +1,221 @@
+/* ========================================
+   RESPONSIVE VALUE BOX SCALING CSS
+   ======================================== */
+
+/* Base value box text sizing */
+.bslib-value-box .value-box-value {
+  font-size: clamp(2rem, 5vw, 4rem) !important;
+  line-height: 1.2;
+  word-break: break-word;
+}
+
+/* Responsive scaling for different screen sizes */
+@media (max-width: 1400px) {
+  .bslib-value-box .value-box-value {
+    font-size: clamp(1.8rem, 4.5vw, 3.5rem) !important;
+  }
+}
+
+@media (max-width: 1200px) {
+  .bslib-value-box .value-box-value {
+    font-size: clamp(1.6rem, 4vw, 3rem) !important;
+  }
+
+  .bslib-value-box .value-box-title {
+    font-size: clamp(1rem, 2vw, 1.5rem) !important;
+  }
+}
+
+@media (max-width: 992px) {
+  .bslib-value-box .value-box-value {
+    font-size: clamp(1.4rem, 3.5vw, 2.5rem) !important;
+  }
+
+  .bslib-value-box .value-box-title {
+    font-size: clamp(0.9rem, 1.8vw, 1.3rem) !important;
+  }
+
+  .bslib-value-box .value-box-showcase {
+    font-size: clamp(2rem, 4vw, 3rem) !important;
+  }
+}
+
+@media (max-width: 768px) {
+  .bslib-value-box .value-box-value {
+    font-size: clamp(1.2rem, 3vw, 2rem) !important;
+  }
+
+  .bslib-value-box .value-box-title {
+    font-size: clamp(0.85rem, 1.5vw, 1.1rem) !important;
+  }
+
+  .bslib-value-box .value-box-showcase {
+    font-size: clamp(1.5rem, 3vw, 2.5rem) !important;
+  }
+
+  /* Hide icons on tablets and smaller */
+  .bslib-value-box .value-box-showcase {
+    display: none !important;
+  }
+}
+
+@media (max-width: 576px) {
+  .bslib-value-box .value-box-value {
+    font-size: clamp(1rem, 2.5vw, 1.5rem) !important;
+  }
+
+  .bslib-value-box .value-box-title {
+    font-size: clamp(0.75rem, 1.2vw, 0.95rem) !important;
+  }
+
+  .value-box-container {
+    gap: 15px !important;
+  }
+}
+
+/* Ensure numbers don't overflow their containers */
+.bslib-value-box {
+  overflow: hidden;
+}
+
+.bslib-value-box .value-box-area {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Make the entire value box responsive */
+.value-box-container {
+  width: 100%;
+  max-width: 100%;
+}
+
+.bslib-value-box {
+  width: 100% !important;
+  min-height: auto !important;
+}
+
+/* ========================================
+   RESPONSIVE CHART SCALING CSS
+   ======================================== */
+
+/* Base chart container */
+.highchart,
+.shiny-plot-output,
+[id*="_plot"] {
+  width: 100% !important;
+  height: auto !important;
+  max-width: 100%;
+}
+
+/* Ensure charts are responsive */
+.html-widget {
+  width: 100% !important;
+  height: auto !important;
+}
+
+/* Card containers holding charts */
+.bslib-card {
+  width: 100% !important;
+  overflow: hidden;
+}
+
+/* Responsive chart heights for different screens */
+@media (max-width: 1400px) {
+  .highchart,
+  [id*="_plot"] {
+    height: 700px !important;
+  }
+}
+
+@media (max-width: 1200px) {
+  .highchart,
+  [id*="_plot"] {
+    height: 600px !important;
+  }
+}
+
+@media (max-width: 992px) {
+  .highchart,
+  [id*="_plot"] {
+    height: 500px !important;
+  }
+
+  /* Adjust nav pills for tablets */
+  .nav-pills-wrapper .nav-pills {
+    flex-wrap: wrap;
+  }
+
+  .nav-pills-wrapper .nav-link {
+    font-size: 0.9rem !important;
+    padding: 8px 12px !important;
+  }
+}
+
+@media (max-width: 768px) {
+  .highchart,
+  [id*="_plot"] {
+    height: 400px !important;
+  }
+
+  /* Stack download buttons vertically on mobile */
+  div[style*="display: flex"][style*="gap: 10px"] {
+    flex-direction: column !important;
+  }
+
+  div[style*="display: flex"][style*="gap: 10px"] button {
+    width: 100% !important;
+    flex: none !important;
+  }
+
+  .nav-pills-wrapper .nav-link {
+    font-size: 0.85rem !important;
+    padding: 6px 10px !important;
+  }
+}
+
+@media (max-width: 576px) {
+  .highchart,
+  [id*="_plot"] {
+    height: 350px !important;
+  }
+
+  /* Further reduce text sizes on charts */
+  .highcharts-title {
+    font-size: 14px !important;
+  }
+
+  .highcharts-axis-labels text {
+    font-size: 10px !important;
+  }
+
+  .highcharts-legend-item text {
+    font-size: 11px !important;
+  }
+
+  .nav-pills-wrapper .nav-link {
+    font-size: 0.8rem !important;
+    padding: 5px 8px !important;
+  }
+}
+
+/* Make chart cards responsive */
+@media (max-width: 768px) {
+  .bslib-card {
+    padding: 10px !important;
+  }
+
+  .bslib-card .card-body {
+    padding: 10px !important;
+  }
+}
+
+/* Ensure full screen mode works properly on all devices */
+.bslib-full-screen {
+  width: 100vw !important;
+  height: 100vh !important;
+}
+
+.bslib-full-screen .highchart,
+.bslib-full-screen [id*="_plot"] {
+  height: calc(100vh - 150px) !important;
+}

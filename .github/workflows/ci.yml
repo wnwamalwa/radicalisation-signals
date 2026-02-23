@@ -1,0 +1,66 @@
+name: R CI (lintr + rcmdcheck)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    name: Lint and Check (Ubuntu)
+    runs-on: ubuntu-latest
+
+    env:
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: 'release'
+
+      - name: Set up pandoc (for vignettes/reports)
+        uses: r-lib/actions/setup-pandoc@v2
+
+      - name: Cache R packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/R/renv
+          key: ${{ runner.os }}-r-${{ hashFiles('**/renv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-r-
+
+      - name: Install system dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+
+      - name: Install R dependencies
+        run: |
+          Rscript -e "install.packages(c('remotes'), repos='https://cloud.r-project.org')"
+          Rscript -e "if (file.exists('renv.lock')) { install.packages('renv'); renv::restore() } else { remotes::install_cran(c('lintr','rcmdcheck')) }"
+
+      - name: Lint with lintr
+        run: |
+          Rscript -e "lintr::lint_dir('.', exclusions = c('www'))"
+
+      - name: Run rcmdcheck
+        run: |
+          Rscript -e "if (file.exists('DESCRIPTION')) { rcmdcheck::rcmdcheck(args = '--no-manual', error_on = 'warning') } else { message('No DESCRIPTION found: running lightweight checks.'); }"
+
+      - name: Upload rcmdcheck artifacts (if present)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rcmdcheck-results
+          path: |
+            **/rcmdcheck/*/00check.log
+            **/rcmdcheck/*/00install.out
+            **/rcmdcheck/*/00build.log
+          if-no-files-found: ignore

@@ -45,10 +45,12 @@ jobs:
         run: |
           Rscript -e "install.packages(c('remotes'), repos='https://cloud.r-project.org')"
           Rscript -e "if (file.exists('renv.lock')) { install.packages('renv'); renv::restore() } else { remotes::install_cran(c('lintr','rcmdcheck')) }"
-
+          
+      - name: List all files in the repository
+        run: ls -R .
+      
       - name: Lint with lintr
-        run: |
-          Rscript -e "lintr::lint_dir('.', exclusions = c('www'))"
+        run: Rscript -e "lintr::lint_dir('.', exclusions = c('www'))"
 
       - name: Run rcmdcheck
         run: |

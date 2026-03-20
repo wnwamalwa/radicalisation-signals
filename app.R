@@ -1363,12 +1363,26 @@ ui <- page_navbar(
                              navset_pill(
                                id = "dash_chart_pills",
                                nav_panel("NCIC Distribution",
-                                         highchartOutput("plot_ncic", height="100%", width="100%")),
+                                         tags$div(style="height:320px;",
+                                                  highchartOutput("plot_ncic", height="320px", width="100%"))),
                                nav_panel("Platform Breakdown",
-                                         highchartOutput("plot_platform", height="100%", width="100%")),
+                                         tags$div(style="height:320px;",
+                                                  highchartOutput("plot_platform", height="320px", width="100%"))),
                                nav_panel("County Risk Map",
-                                         tmapOutput("plot_county_map", height="340px"))
-                             )
+                                         tags$div(style="height:340px;",
+                                                  tmapOutput("plot_county_map", height="340px")))
+                             ),
+                             # JS: trigger resize when pill tab switches so Highcharts/tmap reflow
+                             tags$script(HTML('
+                  $(document).on("shown.bs.tab", function(e) {
+                    setTimeout(function() {
+                      window.dispatchEvent(new Event("resize"));
+                      if (window.Highcharts) {
+                        Highcharts.charts.forEach(function(c) { if(c) c.reflow(); });
+                      }
+                    }, 100);
+                  });
+                '))
                            ),
                            # Tables card with nav_pills
                            card(
@@ -1376,141 +1390,153 @@ ui <- page_navbar(
                              navset_pill(
                                id = "dash_table_pills",
                                nav_panel("Priority Cases",
-                                         tags$div(style="padding-top:10px;",DTOutput("dash_priority"))),
+                                         tags$div(style="padding-top:10px;min-height:200px;",
+                                                  DTOutput("dash_priority"))),
                                nav_panel("Officer Activity",
-                                         tags$div(style="padding-top:10px;",DTOutput("dash_officers")))
-                             )
+                                         tags$div(style="padding-top:10px;min-height:200px;",
+                                                  DTOutput("dash_officers")))
+                             ),
+                             tags$script(HTML('
+                  $(document).on("shown.bs.tab", function(e) {
+                    setTimeout(function() {
+                      $($.fn.dataTable.tables(true)).DataTable().columns.adjust().draw();
+                    }, 150);
+                  });
+                '))
                            )
             )
   ),
   
-  # TAB 3: RAW SIGNALS
-  nav_panel(title=tagList(bs_icon("broadcast")," Raw Signal Feed"),value="tab_signals",padding=16,
-            tags$div(style="background:#f8f9fa;border:1px solid #dee2e6;border-radius:8px;padding:10px 16px;margin-bottom:12px;display:flex;gap:12px;align-items:flex-start;",
-                     tags$span(style="font-size:16px;flex-shrink:0;","📡"),
-                     tags$div(style="font-size:12px;color:#374151;line-height:1.6;",
-                              tags$strong("Unprocessed signal feed — "), "all ingested posts before AI classification. ",
-                              "Use this view to inspect raw content, verify ingestion, or identify posts needing manual triage. ",
-                              tags$span(style="color:#dc3545;font-weight:600;","Content in this feed has not yet been classified or validated by an officer.")
+  nav_menu(title=tagList(bs_icon("grid-3x3-gap")," Intelligence"), value="menu_intel",
+           # TAB 3: RAW SIGNALS
+           nav_panel(title=tagList(bs_icon("broadcast")," Raw Signal Feed"),value="tab_signals",padding=16,
+                     tags$div(style="background:#f8f9fa;border:1px solid #dee2e6;border-radius:8px;padding:10px 16px;margin-bottom:12px;display:flex;gap:12px;align-items:flex-start;",
+                              tags$span(style="font-size:16px;flex-shrink:0;","📡"),
+                              tags$div(style="font-size:12px;color:#374151;line-height:1.6;",
+                                       tags$strong("Unprocessed signal feed — "), "all ingested posts before AI classification. ",
+                                       "Use this view to inspect raw content, verify ingestion, or identify posts needing manual triage. ",
+                                       tags$span(style="color:#dc3545;font-weight:600;","Content in this feed has not yet been classified or validated by an officer.")
+                              )
+                     ),
+                     card(card_header(tagList(bs_icon("broadcast")," All Ingested Signals · ", uiOutput("raw_count", inline=TRUE))),
+                          DTOutput("raw_table"))),
+           
+           # TAB 4: ML CLASSIFICATION
+           nav_panel(title=tagList(bs_icon("cpu")," AI Classification"),value="tab_classify",padding=16,
+                     tags$div(style="background:#f8f9fa;border:1px solid #dee2e6;border-radius:8px;padding:10px 16px;margin-bottom:12px;display:flex;gap:12px;align-items:flex-start;",
+                              tags$span(style="font-size:16px;flex-shrink:0;","🤖"),
+                              tags$div(style="font-size:12px;color:#374151;line-height:1.6;",
+                                       tags$strong("GPT-4o-mini classification under NCIC Cap 170. "),
+                                       "Each post is classified through a three-stage chain: Violence Override → Target Test → Intent Test. ",
+                                       "Results are composite-scored using AI confidence, keyword weights, network exposure, and source history. ",
+                                       tags$span(style="color:#664d03;font-weight:600;","All L4/L5 outputs require officer validation in the Validation & Learning tab before any action.")
+                              )
+                     ),
+                     card(card_header(tagList(bs_icon("arrow-repeat")," Bulk Classification · GPT-4o-mini · NCIC Cap 170 · Async")),
+                          tags$div(style="padding:8px 0;",
+                                   tags$p(style="font-size:12px;color:#6c757d;margin-bottom:8px;",
+                                          "Classifies all unprocessed cases non-blocking. Cache is reused automatically — only new or invalidated posts call the API. Exponential backoff retry on failure."),
+                                   uiOutput("bulk_status_ui"),
+                                   tags$div(style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
+                                            actionButton("btn_bulk",tagList(bs_icon("arrow-repeat")," Start Bulk Classification"),class="btn btn-primary btn-sm"),
+                                            actionButton("btn_retry_failed",tagList(bs_icon("exclamation-triangle")," Retry Failed"),class="btn btn-warning btn-sm"),
+                                            actionButton("btn_clear_cache",tagList(bs_icon("trash")," Clear Cache"),class="btn btn-outline-secondary btn-sm"),
+                                            uiOutput("cache_info"),
+                                            tags$span(class="async-badge","⚡ Non-blocking")))),
+                     # Failure dashboard
+                     uiOutput("api_failure_ui"),
+                     layout_columns(col_widths=c(3,3,3,3),
+                                    value_box("Total",       uiOutput("c_total"),showcase=bs_icon("collection"),          theme="primary"),
+                                    value_box("L4+L5",       uiOutput("c_th"),   showcase=bs_icon("exclamation-triangle"),theme="danger"),
+                                    value_box("Validated",   uiOutput("c_val"),  showcase=bs_icon("shield-check"),        theme="success"),
+                                    value_box("Pending",     uiOutput("c_pend"), showcase=bs_icon("hourglass"),           theme="warning")),
+                     card(card_header(tagList(bs_icon("table")," Classified Cases",
+                                              tags$div(style="float:right;display:flex;gap:5px;",
+                                                       selectInput("clf_ncic",NULL,width="200px",
+                                                                   choices=c("All Levels",setNames(paste0("ncic_",0:5),paste0("L",0:5," ",NCIC_LEVELS))),selected="All Levels"),
+                                                       selectInput("clf_risk",NULL,width="110px",choices=c("All Risk","HIGH","MEDIUM","LOW"),selected="All Risk"),
+                                                       date_filter_ui("clf_dr",NULL)))),
+                          DTOutput("clf_table"))
+           ),
+           
+           # TAB 5: MESSAGE FLOW
+           nav_panel(title=tagList(bs_icon("arrow-left-right")," Message Flow"),value="tab_flow",padding=16,
+                     layout_columns(col_widths=c(3,9),
+                                    card(card_header(tagList(bs_icon("funnel")," Filters")),
+                                         tags$p(style="font-size:11px;color:#6c757d;margin-bottom:10px;line-height:1.6;",
+                                                "Shows directional flow of harmful narratives between origin and target counties. ",
+                                                "Arrow colour reflects NCIC level; thickness reflects volume. Click any arrow for case details."),
+                                         selectInput("fl_ncic","NCIC Level",
+                                                     choices=c("All",setNames(as.character(0:5),paste0("L",0:5," — ",NCIC_LEVELS))),
+                                                     selected="4",width="100%"),
+                                         selectInput("fl_src","Origin County",choices=c("All",counties$name),selected="All",width="100%"),
+                                         selectInput("fl_tgt","Target County",choices=c("All",counties$name),selected="All",width="100%"),
+                                         date_filter_ui("fl_dr"),
+                                         actionButton("fl_reset",tagList(bs_icon("x-circle")," Reset Filters"),
+                                                      class="btn btn-outline-secondary btn-sm w-100",style="margin-top:8px;"),
+                                         tags$hr(style="border-color:#dee2e6;margin:10px 0;"),
+                                         tags$div(style="font-size:11px;color:#6c757d;line-height:1.7;",
+                                                  tags$div(style="font-weight:600;margin-bottom:4px;","Legend"),
+                                                  lapply(rev(as.character(0:5)), function(l)
+                                                    tags$div(style="display:flex;align-items:center;gap:6px;margin-bottom:3px;",
+                                                             tags$div(style=paste0("width:10px;height:10px;border-radius:50%;background:",ncic_color(l),";flex-shrink:0;")),
+                                                             paste0("L",l," — ",ncic_name(l))))
+                                         )
+                                    ),
+                                    card(full_screen=TRUE,
+                                         card_header(tagList(bs_icon("arrow-left-right")," Narrative Flow: Origin County → Target County")),
+                                         leafletOutput("flow_map",height="600px"))
                      )
-            ),
-            card(card_header(tagList(bs_icon("broadcast")," All Ingested Signals · ", uiOutput("raw_count", inline=TRUE))),
-                 DTOutput("raw_table"))),
-  
-  # TAB 4: ML CLASSIFICATION
-  nav_panel(title=tagList(bs_icon("cpu")," AI Classification"),value="tab_classify",padding=16,
-            tags$div(style="background:#f8f9fa;border:1px solid #dee2e6;border-radius:8px;padding:10px 16px;margin-bottom:12px;display:flex;gap:12px;align-items:flex-start;",
-                     tags$span(style="font-size:16px;flex-shrink:0;","🤖"),
-                     tags$div(style="font-size:12px;color:#374151;line-height:1.6;",
-                              tags$strong("GPT-4o-mini classification under NCIC Cap 170. "),
-                              "Each post is classified through a three-stage chain: Violence Override → Target Test → Intent Test. ",
-                              "Results are composite-scored using AI confidence, keyword weights, network exposure, and source history. ",
-                              tags$span(style="color:#664d03;font-weight:600;","All L4/L5 outputs require officer validation in the Validation & Learning tab before any action.")
+           ),
+           
+           # TAB 6: NETWORK ANALYSIS
+           nav_panel(title=tagList(bs_icon("diagram-3")," Who are the actors?"),value="tab_net",padding=16,
+                     tags$div(style="background:#fff8e1;border:1px solid #ffc107;border-left:4px solid #fd7e14;border-radius:8px;padding:10px 16px;margin-bottom:14px;display:flex;gap:12px;align-items:flex-start;",
+                              tags$span(style="font-size:16px;flex-shrink:0;","⚠️"),
+                              tags$div(style="font-size:12px;color:#664d03;line-height:1.6;",
+                                       tags$strong("Caution on handle attribution. "),
+                                       "Handles listed here are social media usernames from ingested content — they are proxies, not confirmed identities. ",
+                                       "Accounts may be automated bots, impersonators, or compromised accounts. ",
+                                       tags$strong("Do not act on handle data alone without independent identity verification.")
+                              )
+                     ),
+                     layout_columns(col_widths=c(6,6),
+                                    card(card_header(tagList(bs_icon("person-fill-exclamation")," Flagged Handles · L3+ activity in past 30 days")),
+                                         DTOutput("net_handles")),
+                                    card(card_header(tagList(bs_icon("share")," Coordinated Inauthentic Behaviour (CIB)")),
+                                         tags$p(style="font-size:11px;color:#6c757d;padding:4px 0 6px;",
+                                                "Accounts posting identical or near-identical content within short time windows may indicate coordinated campaigns."),
+                                         uiOutput("net_cib"))
+                     ),
+                     card(card_header(tagList(bs_icon("table")," High-Exposure Cases · highest network reach scores")),
+                          DTOutput("net_cases"))
+           ),
+           
+           # TAB 7: VALIDATION + LEARNING CENTRE (merged)
+           nav_panel(title=tagList(bs_icon("lock")," Validation & Learning"),value="tab_val",padding=16,
+                     tags$div(style="background:#f0f9ff;border:1px solid #bae6fd;border-left:4px solid #0066cc;border-radius:8px;padding:10px 16px;margin-bottom:4px;display:flex;gap:12px;align-items:flex-start;",
+                              tags$span(style="font-size:16px;flex-shrink:0;","🧑‍⚖️"),
+                              tags$div(style="font-size:12px;color:#0c4a6e;line-height:1.6;",
+                                       tags$strong("Human-in-the-Loop (HITL) validation workflow. "),
+                                       "Officer Validation — review AI classifications, override NCIC levels, add notes, confirm, downgrade, escalate, or clear cases. ",
+                                       "Every decision updates keyword weights, grows the few-shot training bank, and re-scores all historical cases automatically. ",
+                                       tags$strong("Learning Centre — "), "inspect adapted keyword weights, add/remove keywords, review GPT vs officer disagreements."
+                              )
+                     ),
+                     navset_pill(
+                       id = "val_learn_pills",
+                       nav_panel(tagList(bs_icon("shield-check")," Officer Validation"),
+                                 tags$div(style="padding-top:12px;", uiOutput("val_ui"))),
+                       nav_panel(tagList(bs_icon("graph-up")," Learning Centre"),
+                                 tags$div(style="padding-top:12px;", uiOutput("learn_ui")))
                      )
-            ),
-            card(card_header(tagList(bs_icon("arrow-repeat")," Bulk Classification · GPT-4o-mini · NCIC Cap 170 · Async")),
-                 tags$div(style="padding:8px 0;",
-                          tags$p(style="font-size:12px;color:#6c757d;margin-bottom:8px;",
-                                 "Classifies all unprocessed cases non-blocking. Cache is reused automatically — only new or invalidated posts call the API. Exponential backoff retry on failure."),
-                          uiOutput("bulk_status_ui"),
-                          tags$div(style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
-                                   actionButton("btn_bulk",tagList(bs_icon("arrow-repeat")," Start Bulk Classification"),class="btn btn-primary btn-sm"),
-                                   actionButton("btn_retry_failed",tagList(bs_icon("exclamation-triangle")," Retry Failed"),class="btn btn-warning btn-sm"),
-                                   actionButton("btn_clear_cache",tagList(bs_icon("trash")," Clear Cache"),class="btn btn-outline-secondary btn-sm"),
-                                   uiOutput("cache_info"),
-                                   tags$span(class="async-badge","⚡ Non-blocking")))),
-            # Failure dashboard
-            uiOutput("api_failure_ui"),
-            layout_columns(col_widths=c(3,3,3,3),
-                           value_box("Total",       uiOutput("c_total"),showcase=bs_icon("collection"),          theme="primary"),
-                           value_box("L4+L5",       uiOutput("c_th"),   showcase=bs_icon("exclamation-triangle"),theme="danger"),
-                           value_box("Validated",   uiOutput("c_val"),  showcase=bs_icon("shield-check"),        theme="success"),
-                           value_box("Pending",     uiOutput("c_pend"), showcase=bs_icon("hourglass"),           theme="warning")),
-            card(card_header(tagList(bs_icon("table")," Classified Cases",
-                                     tags$div(style="float:right;display:flex;gap:5px;",
-                                              selectInput("clf_ncic",NULL,width="200px",
-                                                          choices=c("All Levels",setNames(paste0("ncic_",0:5),paste0("L",0:5," ",NCIC_LEVELS))),selected="All Levels"),
-                                              selectInput("clf_risk",NULL,width="110px",choices=c("All Risk","HIGH","MEDIUM","LOW"),selected="All Risk"),
-                                              date_filter_ui("clf_dr",NULL)))),
-                 DTOutput("clf_table"))
+           ),
+           
+           # TAB 8: REPORTS
+           nav_panel(title=tagList(bs_icon("file-earmark-bar-graph")," Reports"),value="tab_rep",padding=16,
+                     uiOutput("rep_ui")),
+           
   ),
-  
-  # TAB 5: MESSAGE FLOW
-  nav_panel(title=tagList(bs_icon("arrow-left-right")," Message Flow"),value="tab_flow",padding=16,
-            layout_columns(col_widths=c(3,9),
-                           card(card_header(tagList(bs_icon("funnel")," Filters")),
-                                tags$p(style="font-size:11px;color:#6c757d;margin-bottom:10px;line-height:1.6;",
-                                       "Shows directional flow of harmful narratives between origin and target counties. ",
-                                       "Arrow colour reflects NCIC level; thickness reflects volume. Click any arrow for case details."),
-                                selectInput("fl_ncic","NCIC Level",
-                                            choices=c("All",setNames(as.character(0:5),paste0("L",0:5," — ",NCIC_LEVELS))),
-                                            selected="4",width="100%"),
-                                selectInput("fl_src","Origin County",choices=c("All",counties$name),selected="All",width="100%"),
-                                selectInput("fl_tgt","Target County",choices=c("All",counties$name),selected="All",width="100%"),
-                                date_filter_ui("fl_dr"),
-                                actionButton("fl_reset",tagList(bs_icon("x-circle")," Reset Filters"),
-                                             class="btn btn-outline-secondary btn-sm w-100",style="margin-top:8px;"),
-                                tags$hr(style="border-color:#dee2e6;margin:10px 0;"),
-                                tags$div(style="font-size:11px;color:#6c757d;line-height:1.7;",
-                                         tags$div(style="font-weight:600;margin-bottom:4px;","Legend"),
-                                         lapply(rev(as.character(0:5)), function(l)
-                                           tags$div(style="display:flex;align-items:center;gap:6px;margin-bottom:3px;",
-                                                    tags$div(style=paste0("width:10px;height:10px;border-radius:50%;background:",ncic_color(l),";flex-shrink:0;")),
-                                                    paste0("L",l," — ",ncic_name(l))))
-                                )
-                           ),
-                           card(full_screen=TRUE,
-                                card_header(tagList(bs_icon("arrow-left-right")," Narrative Flow: Origin County → Target County")),
-                                leafletOutput("flow_map",height="600px"))
-            )
-  ),
-  
-  # TAB 6: NETWORK ANALYSIS
-  nav_panel(title=tagList(bs_icon("diagram-3")," Who are the actors?"),value="tab_net",padding=16,
-            tags$div(style="background:#fff8e1;border:1px solid #ffc107;border-left:4px solid #fd7e14;border-radius:8px;padding:10px 16px;margin-bottom:14px;display:flex;gap:12px;align-items:flex-start;",
-                     tags$span(style="font-size:16px;flex-shrink:0;","⚠️"),
-                     tags$div(style="font-size:12px;color:#664d03;line-height:1.6;",
-                              tags$strong("Caution on handle attribution. "),
-                              "Handles listed here are social media usernames from ingested content — they are proxies, not confirmed identities. ",
-                              "Accounts may be automated bots, impersonators, or compromised accounts. ",
-                              tags$strong("Do not act on handle data alone without independent identity verification.")
-                     )
-            ),
-            layout_columns(col_widths=c(6,6),
-                           card(card_header(tagList(bs_icon("person-fill-exclamation")," Flagged Handles · L3+ activity in past 30 days")),
-                                DTOutput("net_handles")),
-                           card(card_header(tagList(bs_icon("share")," Coordinated Inauthentic Behaviour (CIB)")),
-                                tags$p(style="font-size:11px;color:#6c757d;padding:4px 0 6px;",
-                                       "Accounts posting identical or near-identical content within short time windows may indicate coordinated campaigns."),
-                                uiOutput("net_cib"))
-            ),
-            card(card_header(tagList(bs_icon("table")," High-Exposure Cases · highest network reach scores")),
-                 DTOutput("net_cases"))
-  ),
-  
-  # TAB 7: VALIDATION + LEARNING CENTRE (merged)
-  nav_panel(title=tagList(bs_icon("lock")," Validation & Learning"),value="tab_val",padding=16,
-            tags$div(style="background:#f0f9ff;border:1px solid #bae6fd;border-left:4px solid #0066cc;border-radius:8px;padding:10px 16px;margin-bottom:4px;display:flex;gap:12px;align-items:flex-start;",
-                     tags$span(style="font-size:16px;flex-shrink:0;","🧑‍⚖️"),
-                     tags$div(style="font-size:12px;color:#0c4a6e;line-height:1.6;",
-                              tags$strong("Human-in-the-Loop (HITL) validation workflow. "),
-                              "Officer Validation — review AI classifications, override NCIC levels, add notes, confirm, downgrade, escalate, or clear cases. ",
-                              "Every decision updates keyword weights, grows the few-shot training bank, and re-scores all historical cases automatically. ",
-                              tags$strong("Learning Centre — "), "inspect adapted keyword weights, add/remove keywords, review GPT vs officer disagreements."
-                     )
-            ),
-            navset_pill(
-              id = "val_learn_pills",
-              nav_panel(tagList(bs_icon("shield-check")," Officer Validation"),
-                        tags$div(style="padding-top:12px;", uiOutput("val_ui"))),
-              nav_panel(tagList(bs_icon("graph-up")," Learning Centre"),
-                        tags$div(style="padding-top:12px;", uiOutput("learn_ui")))
-            )
-  ),
-  
-  # TAB 8: REPORTS
-  nav_panel(title=tagList(bs_icon("file-earmark-bar-graph")," Reports"),value="tab_rep",padding=16,
-            uiOutput("rep_ui")),
   
   # TAB 9: FORECAST
   nav_panel(title=tagList(bs_icon("graph-up-arrow")," Where is risk heading?"),value="tab_forecast",padding=16,
@@ -1972,6 +1998,26 @@ server <- function(input, output, session) {
   })
   
   # ── Dashboard plots ────────────────────────────────────────
+  # Force re-render when pill tab switches (fixes shinyapps.io blank chart bug)
+  observeEvent(input$dash_chart_pills, {
+    shinyjs::runjs('
+      setTimeout(function() {
+        window.dispatchEvent(new Event("resize"));
+        if (window.Highcharts) {
+          Highcharts.charts.forEach(function(c) { if(c) c.reflow(); });
+        }
+      }, 150);
+    ')
+  })
+  
+  observeEvent(input$dash_table_pills, {
+    shinyjs::runjs('
+      setTimeout(function() {
+        $($.fn.dataTable.tables(true)).DataTable().columns.adjust().draw();
+      }, 150);
+    ')
+  })
+  
   output$plot_ncic <- renderHighchart({
     s     <- dash_summary()
     cnts  <- s$lvl_counts

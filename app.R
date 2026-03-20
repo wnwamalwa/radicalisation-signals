@@ -1274,7 +1274,7 @@ ui <- page_navbar(
                                                                      selectInput("f_platform","Platform",choices=c("All",platforms),selected="All",width="100%"),
                                                                      sliderInput("f_conf","Min. Confidence (%)",min=0,max=100,value=0,step=5,width="100%"),
                                                                      date_filter_ui("map_dr","Date window"),
-                                                                     checkboxInput("show_flow","Show message flow arrows",value=FALSE)
+                                                                     checkboxInput("show_flow","Show message flow arrows",value=TRUE)
                                                      ),
                                                      
                                                      accordion_panel(title=tagList(bs_icon("bar-chart")," Stats"),value="acc_stats",
@@ -1468,7 +1468,7 @@ ui <- page_navbar(
                                                 "Arrow colour reflects NCIC level; thickness reflects volume. Click any arrow for case details."),
                                          selectInput("fl_ncic","NCIC Level",
                                                      choices=c("All",setNames(as.character(0:5),paste0("L",0:5," — ",NCIC_LEVELS))),
-                                                     selected="4",width="100%"),
+                                                     selected="5",width="100%"),
                                          selectInput("fl_src","Origin County",choices=c("All",counties$name),selected="All",width="100%"),
                                          selectInput("fl_tgt","Target County",choices=c("All",counties$name),selected="All",width="100%"),
                                          date_filter_ui("fl_dr"),
@@ -1544,7 +1544,7 @@ ui <- page_navbar(
   
   # TAB 10: DATA, METHODS & ETHICS
   # TAB: DATA, METHODS & ETHICS
-  nav_panel(title=tagList(bs_icon("info-circle")," Data, Methods & Ethics"),value="tab_about",padding=24,
+  nav_panel(title=tagList(bs_icon("info-circle")," Methodology & Interpretation"),value="tab_about",padding=24,
             tags$div(style="max-width:980px;margin:0 auto;",
                      
                      # ── Header ─────────────────────────────────────────────────
@@ -2445,6 +2445,14 @@ server <- function(input, output, session) {
   })
   
   # ── FLOW MAP ───────────────────────────────────────────────
+  # When officer navigates to Message Flow tab, ensure flow map is centred
+  observeEvent(input$main_nav, {
+    if (isTRUE(input$main_nav == "tab_flow")) {
+      leafletProxy("flow_map") |>
+        setView(lng=37.9, lat=0.02, zoom=6)
+    }
+  })
+  
   output$flow_map <- renderLeaflet({
     leaflet() |> addProviderTiles("CartoDB.Positron") |>
       setView(lng=37.9,lat=0.02,zoom=6)
@@ -2952,7 +2960,7 @@ server <- function(input, output, session) {
   
   # Reset Message Flow filters
   observeEvent(input$fl_reset, {
-    updateSelectInput(session, "fl_ncic", selected="4")
+    updateSelectInput(session, "fl_ncic", selected="5")
     updateSelectInput(session, "fl_src",  selected="All")
     updateSelectInput(session, "fl_tgt",  selected="All")
     updateDateRangeInput(session, "fl_dr", start=DATE_MIN, end=DATE_MAX)

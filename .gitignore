@@ -1,1 +1,13 @@
 secrets/
+.Renviron
+cache/ews.sqlite
+cache/classify_cache.rds
+cache/keyword_weights.rds
+cache/validated_examples.rds
+cache/ncic_disagreements.rds
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+.DS_Store
+Thumbs.db

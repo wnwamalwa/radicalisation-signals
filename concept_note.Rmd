@@ -1,0 +1,204 @@
+---
+title: "Early Warning System for Harmful Narratives and Radicalisation in Kenya"
+subtitle: "AI-Driven Decision Support Platform — Concept Note"
+author: "Noah Wamalwa"
+date: "`r format(Sys.Date(), '%B %Y')`"
+output:
+  pdf_document:
+    toc: false
+    number_sections: false
+    latex_engine: xelatex
+geometry: "margin=1in"
+fontsize: 11pt
+header-includes:
+  - \usepackage{fancyhdr}
+  - \usepackage{graphicx}
+  - \usepackage{xcolor}
+  - \usepackage{mdframed}
+  - \definecolor{ncicblue}{HTML}{0066CC}
+  - \definecolor{ncicred}{HTML}{DC3545}
+  - \definecolor{warningbg}{HTML}{FFF8E1}
+  - \pagestyle{fancy}
+  - \fancyhf{}
+  - \fancyhead[L]{\small \textcolor{ncicblue}{\textbf{Radicalisation Signals}} \textcolor{gray}{| NCIC Cap 170 Intelligence Platform}}
+  - \fancyhead[R]{\small \textcolor{gray}{RESTRICTED — Not for Public Distribution}}
+  - \fancyfoot[C]{\small \thepage}
+  - \renewcommand{\headrulewidth}{0.4pt}
+---
+
+\vspace{-1em}
+
+\begin{mdframed}[backgroundcolor=warningbg, linecolor=orange, linewidth=1pt, innertopmargin=8pt, innerbottommargin=8pt]
+\small \textbf{⚠ Important:} AI classifications are analytical aids, not legal findings. This platform is a decision-support tool for trained NCIC intelligence officers. All Level 4–5 classifications require independent officer validation and legal review before any action is taken. \textbf{This document is restricted and not for public distribution.}
+\end{mdframed}
+
+\vspace{1em}
+
+# Overview
+
+**Radicalisation Signals** is an AI-assisted intelligence platform designed to support the **National Cohesion and Integration Commission (NCIC)** of Kenya in monitoring and analysing online content linked to hate speech, ethnic incitement, dehumanisation, and radicalisation.
+
+The platform enables **early detection of harmful narratives** across digital platforms — supporting timely, coordinated, and evidence-based interventions at both national and sub-county levels. It is built on the NCIC Act **Cap 170 framework** and integrates human expert validation at every stage of the classification pipeline.
+
+---
+
+# What the System Does
+
+| Function | Description |
+|---|---|
+| **Signal ingestion** | Monitors Twitter/X, Facebook, TikTok, Telegram, and WhatsApp |
+| **AI classification** | Classifies content against the NCIC 6-level taxonomy using GPT-4o-mini |
+| **Risk scoring** | Composite risk formula incorporating AI confidence, keywords, network exposure, and source history |
+| **Officer validation** | Human-in-the-loop review with override, escalation, and confirmation workflows |
+| **Forecasting** | 14-day county-level escalation projections based on signal trends and velocity |
+| **Reporting** | Automated Excel exports: Quick Briefing, Detailed Report, NCIC Legal Report, County Report |
+| **Dashboard** | Interactive map, trend charts, network analysis, and geographic hotspot visualisation |
+
+Platform: [https://wnwamalwa.shinyapps.io/Radicalisation-Signals/](https://wnwamalwa.shinyapps.io/Radicalisation-Signals/)
+
+---
+
+# Data Coverage
+
+The platform provides comprehensive, multi-dimensional monitoring across Kenya's digital information environment.
+
+**Geographic Scope**
+
+All **47 counties** of Kenya are covered using real **IEBC administrative boundaries**, enabling precise geospatial analysis at the county and sub-county (ward) level. Counties are mapped to known sub-locations — for example, Nairobi signals are attributed to specific areas including Kibera, Kayole, Mathare, Korogocho, Eastleigh, Kasarani, and Embakasi, enabling targeted community-level interventions.
+
+**Monitoring Window**
+
+The platform operates on a **rolling 30-day window**. All historical cases are automatically re-scored whenever an intelligence officer refines the keyword weights through validation — ensuring that new insights from recent cases are applied retroactively across the entire dataset, not just future classifications.
+
+**Platform Coverage**
+
+| Platform | Relevance |
+|---|---|
+| **Twitter/X** | High-velocity public discourse; political commentary and incitement often breaks here first |
+| **Facebook** | Dominant platform for community groups, electoral mobilisation, and ethnic narrative spread |
+| **TikTok** | Emerging vector for youth-targeted radicalisation content; short-form video with high reach |
+| **Telegram** | Encrypted channels used for coordinated content distribution and closed community organising |
+| **WhatsApp** | Primary mass communication channel in Kenya; key vector for misinformation and forward chains |
+
+**Language Coverage**
+
+| Language | Context |
+|---|---|
+| **Swahili** | National language; most monitored content is in Swahili or Swahili-English code-switching |
+| **English** | Official language; formal political and media discourse |
+| **Sheng** | Urban youth vernacular (Nairobi, Mombasa, Kisumu); frequently used to evade keyword detection |
+| **Kikuyu** | Central Kenya; high relevance during electoral periods in Mt Kenya region |
+| **Luo** | Nyanza region; significant during inter-community tension events |
+| **Kalenjin** | Rift Valley; historically associated with PEV-era rhetoric patterns |
+
+**Note on language accuracy:** Classification performance is highest for Swahili and English. Mixed-language (code-switched) posts, particularly in Sheng, may have lower accuracy. Content in Kikuyu, Luo, or Kalenjin without Swahili/English elements is the most challenging for the current model.
+
+**Geospatial Infrastructure**
+
+County polygon boundaries are derived from the **official IEBC shapefile**, providing legally authoritative administrative boundaries for all 47 counties. The choropleth map uses a green-to-red risk gradient with explicit grey rendering for counties with insufficient data, ensuring officers are never misled by empty polygons.
+
+---
+
+# The NCIC 6-Level Classification Taxonomy
+
+All content is classified against Cap 170 on a six-point scale:
+
+| Level | Label | Action |
+|---|---|---|
+| **L0** | Neutral Discussion | No action. Log for trend analysis. |
+| **L1** | Offensive Language | Monitor. Flag for weekly review. |
+| **L2** | Prejudice / Stereotyping | Document pattern. Request platform review if repeated. |
+| **L3** | Dehumanization | Issue monitoring flag. Initiate engagement with poster. |
+| **L4** | Hate Speech | **Section 13 threshold met.** Require takedown. Alert DCI. |
+| **L5** | Toxic | **IMMEDIATE ESCALATION.** Press charges. Contact DCI now. |
+
+Levels 0–1 are protected speech. Levels 4–5 cross the Section 13 legal threshold.
+
+---
+
+# Classification Methodology
+
+The platform applies a three-stage decision chain to every post before assigning an NCIC level:
+
+**Stage 1 — Violence Override (applied unconditionally first)**
+Any explicit or implicit call to kill, attack, burn, or physically harm — regardless of the target — immediately classifies the post L4 or L5. The activism test is blocked. Examples: *'Kill the MP'* → L5. *'Mpige risasi'* → L5.
+
+**Stage 2 — Target Test**
+If violence is absent: is the target a *protected group* (ethnic, religious, or regional community) or a *public official/institution*? Criticism of officials defaults to L0/L1 — political accountability is constitutionally protected. Targeting a protected group may qualify L2–L5.
+
+**Stage 3 — Intent Test**
+What outcome does the speaker seek? Accountability ('vote out', 'resign', 'audit') → L0/L1. Exclusion ('waende', 'go back') → L3/L4. Dehumanisation ('they are vermin') → L3+. Mobilisation against a group → L4.
+
+**Risk Formula:**
+$$\text{Risk} = 0.55 \times \text{composite} + 0.45 \times \text{NCIC\_base}$$
+$$\text{composite} = 0.30 \times \text{confidence} + 0.22 \times \text{keyword} + 0.13 \times \text{network} + 0.08 \times \text{spike} + 0.12 \times \text{context} + 0.15 \times \text{source\_history}$$
+
+---
+
+# Safeguards and Responsible Use
+
+The platform incorporates multiple layers of protection against misclassification and misuse:
+
+1. **Mandatory human review** — No legal or enforcement action is triggered by AI alone. Every L2+ case requires an NCIC officer to Confirm, Downgrade, Escalate, or Clear.
+2. **Activism protection** — The three-stage chain explicitly protects political accountability speech from being misclassified as hate speech.
+3. **Continuous re-calibration** — Officer validations update keyword weights in real time. All historical cases are automatically re-scored.
+4. **Deterministic classification** — temperature=0 ensures consistent results; responses are cached by content hash.
+5. **Unit-tested logic** — 24 automated tests cover risk scoring, source context, violence override, and edge cases.
+6. **Cross-session synchronisation** — All officer decisions are persisted to SQLite and synchronised across concurrent sessions every 5 seconds.
+
+---
+
+# Target Users
+
+| User Group | Use |
+|---|---|
+| NCIC Intelligence Officers | Primary users — validate, escalate, and act on classified content |
+| Government Analysts & Policy Units | Strategic oversight and briefing |
+| Security and Intelligence Agencies | Operational coordination and escalation |
+| Researchers and CSOs | Evidence-based advocacy and analysis |
+
+**Note:** This is a restricted, non-public system. Unauthorised access or distribution of outputs is prohibited.
+
+---
+
+# Institutional Framework
+
+**Lead Agency:** National Cohesion and Integration Commission (NCIC)
+
+**Supporting Institutions (Proposed):**
+
+- National Intelligence Service (NIS)
+- Anti-Terrorism Police Unit (ATPU)
+- Communications Authority of Kenya (CA)
+- Media Council of Kenya (MCK)
+- National Intelligence and Research University (NIRU)
+- United Nations Development Programme (UNDP)
+
+---
+
+# Expected Outcomes
+
+- Early detection of harmful narratives and radicalisation risks before they escalate
+- Identification of county and sub-county level hotspots for targeted interventions
+- Improved inter-agency coordination with a shared, evidence-based intelligence picture
+- Data-driven policy formulation and operational decision-making
+- Strengthened national cohesion and conflict prevention capacity
+
+---
+
+# Value Proposition
+
+This platform enables Kenya to shift from **reactive response** to **proactive, geographically targeted prevention** — using AI to support coordinated national action within a legal, human-rights-compliant framework anchored in Cap 170.
+
+\vspace{2em}
+
+---
+
+\begin{center}
+\small \textcolor{gray}{
+\textbf{Noah Wamalwa} · Project Lead / Developer \\
+Radicalisation Signals v5 · NCIC Cap 170 · GPT-4o-mini + Human-in-the-Loop · Kenya \\
+\textit{Developed for the IEA Kenya NIRU AI Hackathon} \\
+\href{https://wnwamalwa.shinyapps.io/Radicalisation-Signals/}{https://wnwamalwa.shinyapps.io/Radicalisation-Signals/}
+}
+\end{center}

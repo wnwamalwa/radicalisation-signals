@@ -1,0 +1,12 @@
+name: Radicalisation-Signals
+title: Radicalisation-Signals
+username: wnwamalwa
+account: wnwamalwa
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 16938581
+bundleId: 11736265
+url: https://wnwamalwa.shinyapps.io/Radicalisation-Signals/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE

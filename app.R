@@ -24,13 +24,17 @@
 #   install.packages(c("shiny","bslib","bsicons","leaflet",
 #     "leaflet.extras2","DT","dplyr","writexl","httr2","jsonlite",
 #     "shinyjs","digest","future","promises","plotly","later",
-#     "highcharter","sf","tmap","tools","DBI","RSQLite"))
+#     "highcharter","sf","tmap","tools","DBI","RSQLite","bcrypt",
+#     "prophet","cld3"))
 #
 #  secrets/.Renviron:
 #   OPENAI_API_KEY=sk-proj-...
 #   GMAIL_USER=you@gmail.com
 #   GMAIL_PASS=xxxx xxxx xxxx xxxx
 #   OFFICER_EMAIL=officer@ncic.go.ke
+#   ADMIN_USERNAME=admin          # username for the first admin account
+#   ADMIN_PASSWORD=<strong-pass>  # hashed on first run — change immediately after deploy
+#   (never commit .Renviron to git — add it to .gitignore)
 # ================================================================
 
 readRenviron("secrets/.Renviron")
@@ -42,7 +46,9 @@ library(httr2);    library(jsonlite);   library(shinyjs)
 library(digest);   library(future);     library(promises)
 library(plotly);   library(later);    library(highcharter)
 library(sf);       library(tmap)
-library(DBI);      library(RSQLite)
+library(DBI);      library(RSQLite);    library(bcrypt)
+library(prophet)
+library(cld3)      # language detection (install: install.packages("cld3"))
 
 plan(multisession)
 `%||%` <- function(a, b) if (!is.null(a)) a else b
@@ -50,12 +56,12 @@ plan(multisession)
 # ── CONSTANTS ────────────────────────────────────────────────────
 APP_NAME         <- "Radicalisation Signals"
 APP_SUBTITLE     <- "AI Early Warning Platform for Kenya"
-OFFICER_PASSWORD <- "intel2025"
 OPENAI_MODEL     <- "gpt-4o-mini"
 CACHE_DIR        <- "cache"
 CACHE_FILE       <- file.path(CACHE_DIR, "classify_cache.rds")  # GPT response cache (RDS)
 DB_FILE          <- file.path(CACHE_DIR, "ews.sqlite")           # persistent SQLite store
 VAL_PAGE_SIZE    <- 6
+SESSION_TIMEOUT  <- 20L   # minutes of inactivity before auto-lock
 
 # ── NCIC 6-LEVEL TAXONOMY ───────────────────────────────────────
 NCIC_LEVELS <- c(
@@ -109,7 +115,11 @@ ncic_s13     <- function(lvl) isTRUE(NCIC_SECTION13[as.character(lvl)])
 # ── SQLite DATABASE LAYER ─────────────────────────────────────────
 if (!dir.exists(CACHE_DIR)) dir.create(CACHE_DIR, recursive=TRUE)
 
-db_connect <- function() dbConnect(RSQLite::SQLite(), DB_FILE)
+db_connect <- function() {
+  con <- dbConnect(RSQLite::SQLite(), DB_FILE)
+  dbExecute(con, "PRAGMA journal_mode=WAL;")   # concurrent reads without locking
+  con
+}
 
 db_init <- function() {
   con <- db_connect(); on.exit(dbDisconnect(con))
@@ -141,10 +151,171 @@ db_init <- function() {
     "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
     "case_id TEXT, tweet_text TEXT, error_msg TEXT, ",
     "attempt INTEGER DEFAULT 1, ts TEXT, resolved INTEGER DEFAULT 0)"))
+  dbExecute(con, paste0(
+    "CREATE TABLE IF NOT EXISTS officers (",
+    "username TEXT PRIMARY KEY, ",
+    "password_hash TEXT NOT NULL, ",
+    "role TEXT DEFAULT 'officer', ",
+    "active INTEGER DEFAULT 1, ",
+    "created_at TEXT)"))
+  dbExecute(con, paste0(
+    "CREATE TABLE IF NOT EXISTS s13_queue (",
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
+    "case_id TEXT NOT NULL, ",
+    "county TEXT, platform TEXT, tweet_text TEXT, ",
+    "ncic_level INTEGER, risk_score INTEGER, ",
+    "target_group TEXT, validated_by TEXT, validated_at TEXT, ",
+    "status TEXT DEFAULT 'PENDING', ",   # PENDING | FILED | DCI_ALERTED | RESOLVED
+    "dci_ref TEXT, ",                    # DCI reference number when filed
+    "notes TEXT, ",
+    "created_at TEXT, updated_at TEXT)"))
+  dbExecute(con, paste0(
+    "CREATE TABLE IF NOT EXISTS audit_log (",
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
+    "ts TEXT NOT NULL, ",
+    "officer TEXT NOT NULL, ",
+    "officer_name TEXT, ",
+    "action TEXT NOT NULL, ",
+    "case_id TEXT, ",
+    "detail TEXT, ",
+    "session_id TEXT)"))
   message("[db] SQLite initialised at ", DB_FILE)
 }
 
+# ── Officer auth helpers ─────────────────────────────────────────
+# Seed a default admin on first run from .Renviron:
+#   ADMIN_USERNAME=admin
+#   ADMIN_PASSWORD=<your-strong-password>
+# Never hardcode credentials in app.R.
+db_seed_admin <- function() {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  existing <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM officers")$n
+  if (existing > 0) return(invisible(NULL))   # already seeded
+  
+  u <- Sys.getenv("ADMIN_USERNAME")
+  p <- Sys.getenv("ADMIN_PASSWORD")
+  if (nchar(u) == 0 || nchar(p) == 0) {
+    warning("[auth] ADMIN_USERNAME / ADMIN_PASSWORD not set in .Renviron — no officers seeded. ",
+            "Run setup_officers.R to add officers before deploying.")
+    return(invisible(NULL))
+  }
+  hashed <- bcrypt::hashpw(p)
+  dbExecute(con,
+            "INSERT INTO officers (username, password_hash, role, active, created_at) VALUES (?,?,?,1,?)",
+            list(u, hashed, "admin", format(Sys.time(), "%Y-%m-%d %H:%M:%S")))
+  message(sprintf("[auth] Default admin '%s' seeded from .Renviron", u))
+}
+
+db_check_password <- function(username, password) {
+  # Returns list(ok, role) — timing-safe via bcrypt::checkpw
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  row <- dbGetQuery(con,
+                    "SELECT password_hash, role, active FROM officers WHERE username = ?",
+                    list(trimws(tolower(username))))
+  if (nrow(row) == 0 || row$active[1] != 1L)
+    return(list(ok=FALSE, role=NA_character_))
+  ok <- tryCatch(bcrypt::checkpw(password, row$password_hash[1]),
+                 error = function(e) FALSE)
+  list(ok=ok, role=if(ok) row$role[1] else NA_character_)
+}
+
+db_add_officer <- function(username, password, role="officer") {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  hashed <- bcrypt::hashpw(password)
+  dbExecute(con,
+            "INSERT OR REPLACE INTO officers (username, password_hash, role, active, created_at) VALUES (?,?,?,1,?)",
+            list(trimws(tolower(username)), hashed, role, format(Sys.time(), "%Y-%m-%d %H:%M:%S")))
+  message(sprintf("[auth] Officer '%s' (role: %s) added/updated", username, role))
+}
+
+db_deactivate_officer <- function(username) {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  dbExecute(con, "UPDATE officers SET active=0 WHERE username=?",
+            list(trimws(tolower(username))))
+  message(sprintf("[auth] Officer '%s' deactivated", username))
+}
+
+# ── Audit log helpers ────────────────────────────────────────────
+audit <- function(officer, officer_name, action, case_id=NA, detail=NA, session_id=NA) {
+  tryCatch({
+    con <- db_connect(); on.exit(dbDisconnect(con))
+    dbExecute(con,
+              "INSERT INTO audit_log (ts, officer, officer_name, action, case_id, detail, session_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)",
+              list(format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+                   as.character(officer %||% "unknown"),
+                   as.character(officer_name %||% ""),
+                   as.character(action),
+                   if (is.na(case_id))  NA_character_ else as.character(case_id),
+                   if (is.na(detail))   NA_character_ else as.character(detail),
+                   if (is.na(session_id)) NA_character_ else as.character(session_id)))
+  }, error = function(e) message("[audit] log failed: ", e$message))
+}
+
+db_load_audit <- function(limit=500) {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  tryCatch(
+    dbGetQuery(con, sprintf(
+      "SELECT id, ts, officer, officer_name, action, case_id, detail
+       FROM audit_log ORDER BY id DESC LIMIT %d", as.integer(limit))),
+    error = function(e) data.frame()
+  )
+}
+
+db_load_officers <- function() {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  tryCatch(
+    dbGetQuery(con,
+               "SELECT username, role, active, created_at FROM officers ORDER BY created_at"),
+    error = function(e) data.frame()
+  )
+}
+
+# ── S13 Escalation Queue helpers ─────────────────────────────────
+db_s13_enqueue <- function(case_row, officer) {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  existing <- dbGetQuery(con,
+                         "SELECT id FROM s13_queue WHERE case_id=?", list(case_row$case_id))
+  if (nrow(existing) > 0) return(invisible(FALSE))  # already queued
+  now <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  dbExecute(con,
+            "INSERT INTO s13_queue
+     (case_id,county,platform,tweet_text,ncic_level,risk_score,
+      target_group,validated_by,validated_at,status,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            list(case_row$case_id, case_row$county, case_row$platform,
+                 substr(case_row$tweet_text,1,200),
+                 case_row$ncic_level, case_row$risk_score,
+                 case_row$target_group %||% "", officer,
+                 format(Sys.time(),"%Y-%m-%d %H:%M"),
+                 "PENDING", now, now))
+  invisible(TRUE)
+}
+
+db_s13_update_status <- function(id, status, dci_ref=NA, notes=NA) {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  dbExecute(con,
+            "UPDATE s13_queue SET status=?, dci_ref=?, notes=?, updated_at=? WHERE id=?",
+            list(status,
+                 if (is.na(dci_ref)) NA_character_ else dci_ref,
+                 if (is.na(notes))   NA_character_ else notes,
+                 format(Sys.time(), "%Y-%m-%d %H:%M:%S"), as.integer(id)))
+}
+
+db_s13_load <- function() {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  tryCatch(
+    dbGetQuery(con,
+               "SELECT * FROM s13_queue ORDER BY
+       CASE status WHEN 'PENDING' THEN 0 WHEN 'FILED' THEN 1
+                   WHEN 'DCI_ALERTED' THEN 2 ELSE 3 END,
+       ncic_level DESC, risk_score DESC"),
+    error = function(e) data.frame()
+  )
+}
+
 db_init()
+db_seed_admin()
 
 # ── Cases ────────────────────────────────────────────────────────
 db_load_cases <- function() {
@@ -1191,14 +1362,17 @@ auth_wall_ui <- function() {
                    tags$div(class="auth-box",
                             tags$div(style="font-size:48px;margin-bottom:10px;","🇰🇪"),
                             tags$h3(APP_NAME,style="font-size:18px;"),
-                            tags$p("Officer access only. Enter your name and access code.",
+                            tags$p("Authorised NCIC personnel only. Enter your credentials.",
                                    style="color:#6c757d;font-size:12px;margin-bottom:18px;"),
-                            textInput("auth_name",NULL,placeholder="Your full name (e.g. Officer Mwangi)",width="100%"),
-                            passwordInput("auth_password",NULL,placeholder="Access code",width="100%"),
+                            textInput("auth_name", NULL, placeholder="Full name (e.g. Officer Mwangi)", width="100%"),
+                            textInput("auth_username", NULL, placeholder="Username", width="100%"),
+                            passwordInput("auth_password", NULL, placeholder="Password", width="100%"),
                             tags$div(style="margin-bottom:10px;"),
-                            actionButton("auth_submit","Authenticate",
+                            actionButton("auth_submit","Sign In",
                                          style="width:100%;background:#0066cc;color:#fff;border:none;font-weight:700;font-size:14px;padding:11px;border-radius:6px;"),
-                            tags$div(id="auth_error",style="color:#dc3545;font-size:12px;margin-top:8px;")
+                            tags$div(id="auth_error",style="color:#dc3545;font-size:12px;margin-top:8px;"),
+                            tags$div(style="margin-top:16px;padding-top:12px;border-top:1px solid #f0f0f0;font-size:11px;color:#9ca3af;",
+                                     "Credentials are stored as bcrypt hashes. Contact your admin to reset a password.")
                    )
           )
   )
@@ -1214,8 +1388,245 @@ apply_date_filter <- function(d, dr) {
   d[as.Date(d$timestamp)>=dr[1] & as.Date(d$timestamp)<=dr[2], ]
 }
 
-# ── UI ───────────────────────────────────────────────────────────
+# ── LANGUAGE DETECTION LAYER ─────────────────────────────────────
+# Detects language using cld3 and maps to human-readable labels.
+# Also flags Sheng (Swahili-English code-switching) heuristically.
+# Used to warn officers when classification confidence may be reduced.
+
+LANG_LABELS <- c(
+  sw = "Swahili", en = "English", ki = "Kikuyu",
+  luo= "Luo",     kln= "Kalenjin", so = "Somali",
+  ar = "Arabic",  fr = "French",   om = "Oromo"
+)
+
+SHENG_MARKERS <- c(
+  "si","aki","niaje","sawa","maze","mbona","kwani","buda","dame",
+  "mresh","fiti","poa","msee","wadau","mtu wangu","kama kawaida",
+  "acha","izo","lakini","hii","hizo","dem","moto","bomba","chali"
+)
+
+detect_language <- function(text) {
+  # Returns list(code, label, confidence, is_sheng, is_mixed, warning)
+  result <- tryCatch({
+    det <- cld3::detect_language(text)
+    code <- if (is.na(det)) "unknown" else det
+    list(code=code, confidence=NA_real_)
+  }, error = function(e) list(code="unknown", confidence=NA_real_))
+  
+  code  <- result$code
+  label <- LANG_LABELS[code] %||% paste0("Other (", code, ")")
+  
+  # Sheng detection: post tagged sw/en but contains Sheng markers
+  text_l   <- tolower(text)
+  n_sheng  <- sum(sapply(SHENG_MARKERS, function(m) grepl(m, text_l, fixed=TRUE)))
+  is_sheng <- n_sheng >= 2 && code %in% c("sw","en","unknown")
+  
+  # Mixed language: multiple scripts or lang markers from different families
+  has_latin    <- grepl("[a-zA-Z]", text)
+  has_arabic   <- grepl("[\u0600-\u06FF]", text)
+  is_mixed     <- has_latin && has_arabic
+  
+  # Low-coverage languages for this model
+  low_coverage <- code %in% c("ki","kln","luo","so","om","unknown")
+  
+  warning_msg <- if (is_sheng)
+    "⚠ Sheng/code-switching detected — classification confidence may be reduced. Officer review recommended."
+  else if (is_mixed)
+    "⚠ Mixed-script content detected — verify classification manually."
+  else if (low_coverage && code != "unknown")
+    paste0("⚠ Low-coverage language (", label, ") — GPT-4o-mini accuracy is reduced for this language.")
+  else if (code == "unknown")
+    "⚠ Language could not be detected — manual review recommended."
+  else NA_character_
+  
+  list(
+    code        = code,
+    label       = label,
+    is_sheng    = is_sheng,
+    is_mixed    = is_mixed,
+    low_coverage= low_coverage,
+    warning     = warning_msg
+  )
+}
+
+# ── PROPHET FORECAST ENGINE ──────────────────────────────────────
+# Fits a Prophet model per county on daily risk scores.
+# Falls back gracefully to weighted heuristic if data is insufficient.
+# Returns a list: escalation_score, forecast_level, trend, drivers,
+#                 prophet_used (bool), forecast_df (future 14d), hist_df
+
+FORECAST_DAYS   <- 14L
+FORECAST_WINDOW <- 30L   # days of history used for training
+MIN_PROPHET_OBS <- 7L    # minimum daily obs needed to fit Prophet
+
+run_prophet_forecast <- function(cases_df, county_name, now = Sys.time()) {
+  cutoff  <- now - as.difftime(FORECAST_WINDOW, units = "days")
+  h       <- cases_df[!is.na(cases_df$timestamp) &
+                        cases_df$timestamp >= cutoff &
+                        cases_df$county == county_name, ]
+  all_co  <- cases_df[cases_df$county == county_name, ]
+  
+  # ── Shared summary stats (always computed) ────────────────────
+  n_recent     <- nrow(h)
+  avg_risk     <- if (n_recent > 0) round(mean(h$risk_score,  na.rm=TRUE), 0) else 0L
+  avg_ncic     <- if (n_recent > 0) round(mean(h$ncic_level,  na.rm=TRUE), 1) else 0
+  n_high       <- sum(h$ncic_level >= 4, na.rm=TRUE)
+  n_s13        <- sum(isTRUE(h$section_13), na.rm=TRUE)
+  top_platform <- if (n_recent > 0) names(sort(table(h$platform),  decreasing=TRUE))[1] else "—"
+  top_category <- if (n_recent > 0) names(sort(table(h$category),  decreasing=TRUE))[1] else "—"
+  
+  # ── Aggregate to daily risk score (Prophet needs ds + y) ──────
+  prophet_used <- FALSE
+  escalation_score <- 0L
+  hist_df      <- NULL
+  forecast_df  <- NULL
+  trend        <- 0L
+  
+  if (n_recent >= MIN_PROPHET_OBS) {
+    daily <- h |>
+      mutate(ds = as.Date(timestamp)) |>
+      group_by(ds) |>
+      summarise(y = mean(risk_score, na.rm=TRUE), .groups="drop") |>
+      arrange(ds)
+    
+    # Need at least MIN_PROPHET_OBS distinct days
+    if (nrow(daily) >= MIN_PROPHET_OBS) {
+      prophet_used <- TRUE
+      
+      m <- tryCatch({
+        prophet(
+          daily,
+          daily.seasonality  = FALSE,
+          weekly.seasonality = TRUE,
+          yearly.seasonality = FALSE,
+          seasonality.mode   = "additive",
+          changepoint.prior.scale = 0.15,   # moderate flexibility
+          interval.width     = 0.80,
+          verbose            = FALSE
+        )
+      }, error = function(e) NULL)
+      
+      if (!is.null(m)) {
+        future_df   <- make_future_dataframe(m, periods = FORECAST_DAYS, freq = "day")
+        forecast_df <- predict(m, future_df)
+        
+        # Historical actuals (for chart)
+        hist_df <- daily
+        
+        # Escalation score = capped mean of Prophet's upper-bound forecast
+        # for the next 14 days, normalised to 0–100
+        fc_next <- forecast_df[forecast_df$ds > as.Date(now), ]
+        if (nrow(fc_next) > 0) {
+          # Use yhat_upper for a conservative worst-case view
+          raw_score        <- mean(fc_next$yhat_upper, na.rm=TRUE)
+          escalation_score <- min(100L, max(0L, round(raw_score)))
+        } else {
+          escalation_score <- min(100L, avg_risk)
+        }
+        
+        # Trend: slope over forecast period vs last 7d actuals
+        last7   <- daily[daily$ds >= as.Date(now) - 7, ]
+        risk_w1 <- if (nrow(last7) > 0) mean(last7$y, na.rm=TRUE) else NA
+        risk_w2 <- mean(daily$y[seq_len(max(1, nrow(daily)-7))], na.rm=TRUE)
+        trend   <- if (!is.na(risk_w1) && risk_w2 > 0)
+          round((risk_w1 - risk_w2) / risk_w2 * 100, 0) else 0L
+        
+      } else {
+        prophet_used <- FALSE   # model failed — fall through to heuristic
+      }
+    }
+  }
+  
+  # ── Heuristic fallback (when Prophet can't fit) ───────────────
+  if (!prophet_used) {
+    w1 <- h[h$timestamp >= now - as.difftime(7,  units="days"), ]
+    w2 <- h[h$timestamp >= now - as.difftime(14, units="days") &
+              h$timestamp <  now - as.difftime(7,  units="days"), ]
+    risk_w1  <- if (nrow(w1) > 0) mean(w1$risk_score, na.rm=TRUE) else NA
+    risk_w2  <- if (nrow(w2) > 0) mean(w2$risk_score, na.rm=TRUE) else NA
+    trend    <- if (!is.na(risk_w1) && !is.na(risk_w2) && risk_w2 > 0)
+      round((risk_w1 - risk_w2) / risk_w2 * 100, 0) else 0L
+    velocity <- if (nrow(w1) > 0) round(nrow(w1) / 7, 1) else 0
+    escalation_score <- min(100L, round(
+      avg_risk * 0.35 + avg_ncic * 8 + n_high * 3 +
+        max(0, trend) * 0.5 + velocity * 4))
+  }
+  
+  # ── Forecast level ────────────────────────────────────────────
+  forecast_level <- if      (escalation_score >= 70) "CRITICAL"
+  else if (escalation_score >= 50) "HIGH"
+  else if (escalation_score >= 30) "ELEVATED"
+  else if (escalation_score >  0)  "MONITORED"
+  else                             "STABLE"
+  
+  # ── Key drivers ───────────────────────────────────────────────
+  drivers <- c(
+    if (prophet_used)    "Prophet time-series model"      else "Heuristic (insufficient data)",
+    if (avg_ncic >= 3.5) "High avg NCIC level"            else NULL,
+    if (n_high   >= 3)   paste0(n_high, " L4+ cases")     else NULL,
+    if (trend    > 20)   paste0("↑", trend, "% trend")    else NULL,
+    if (n_s13    > 0)    paste0(n_s13, " S13 cases")      else NULL
+  )
+  
+  list(
+    county           = county_name,
+    n_recent         = n_recent,
+    avg_risk         = avg_risk,
+    avg_ncic         = avg_ncic,
+    n_high           = n_high,
+    n_s13            = n_s13,
+    trend            = trend,
+    top_platform     = top_platform,
+    top_category     = top_category,
+    escalation_score = escalation_score,
+    forecast_level   = forecast_level,
+    drivers          = paste(drivers, collapse = " · "),
+    prophet_used     = prophet_used,
+    hist_df          = hist_df,
+    forecast_df      = forecast_df
+  )
+}
+
+# ── Run forecast for all counties (cached per session) ───────────
+build_county_forecasts <- function(cases_df, now = Sys.time()) {
+  results <- lapply(counties$name, function(co) {
+    tryCatch(
+      run_prophet_forecast(cases_df, co, now),
+      error = function(e) {
+        message(sprintf("[forecast] %s failed: %s", co, e$message))
+        list(county=co, n_recent=0, avg_risk=0, avg_ncic=0, n_high=0,
+             n_s13=0, trend=0, top_platform="—", top_category="—",
+             escalation_score=0, forecast_level="STABLE",
+             drivers="Model error", prophet_used=FALSE,
+             hist_df=NULL, forecast_df=NULL)
+      }
+    )
+  })
+  results
+}
 ui <- page_navbar(
+  header = tags$head(
+    tags$script(HTML(sprintf('
+      // ── Inactivity tracker ─────────────────────────────────────
+      (function() {
+        var timer;
+        function ping() {
+          clearTimeout(timer);
+          timer = setTimeout(function() {
+            if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
+              Shiny.setInputValue("activity_ping", Date.now(), {priority: "event"});
+            }
+          }, 5000);
+        }
+        ["mousemove","keydown","mousedown","touchstart","scroll","click"]
+          .forEach(function(ev) { document.addEventListener(ev, ping, true); });
+        setTimeout(function() {
+          if (typeof Shiny !== "undefined")
+            Shiny.setInputValue("activity_ping", Date.now(), {priority: "event"});
+        }, 3000);
+      })();
+    ')))
+  ),
   title = tags$span(
     style="display:inline-flex;align-items:center;gap:10px;",
     tags$span(
@@ -1247,7 +1658,7 @@ ui <- page_navbar(
                            sidebar=sidebar(id="sid_map",width=310,open=TRUE,bg="#fff",
                                            accordion(id="acc_map",open=c("acc_chat","acc_filt"),
                                                      
-                                                     accordion_panel(title=tagList(bs_icon("robot")," ML Classifier"),value="acc_chat",
+                                                     accordion_panel(title=tagList(bs_icon("robot")," ML Classifier — DEMO"),value="acc_chat",
                                                                      tags$p(style="font-size:11px;color:#6c757d;margin-bottom:6px;",
                                                                             "Paste any post — classified under NCIC Cap 170 framework."),
                                                                      uiOutput("chat_history"),
@@ -1511,6 +1922,14 @@ ui <- page_navbar(
            nav_panel(title=tagList(bs_icon("file-earmark-bar-graph")," Reports"),value="tab_rep",padding=16,
                      uiOutput("rep_ui")),
            
+           # TAB 9: S13 ESCALATION QUEUE
+           nav_panel(title=tagList(bs_icon("exclamation-octagon")," S13 Escalation"),value="tab_s13",padding=16,
+                     uiOutput("s13_ui")),
+           
+           # TAB 10: AUDIT LOG (admin only)
+           nav_panel(title=tagList(bs_icon("clock-history")," Audit Log"),value="tab_audit",padding=16,
+                     uiOutput("audit_ui")),
+           
   ),
   
   # TAB 9: FORECAST
@@ -1669,7 +2088,7 @@ ui <- page_navbar(
                                                          tags$p(tags$strong("Risk score relativity: "),
                                                                 "Scores are relative to this dataset and analysis window. They cannot be compared to external threat indices or previous versions of this platform."),
                                                          tags$p(tags$strong("Forecast limitations: "),
-                                                                "The 14-day forecast uses a weighted formula, not a fitted time-series model. It is a directional indicator, not a calibrated probabilistic projection.")
+                                                                "Per-county Prophet time-series models are fitted on 30 days of daily mean risk scores. Counties with fewer than 7 days of data fall back to a weighted heuristic. Forecasts are directional indicators — not calibrated probabilistic projections — and require officer review before operational action.")
                                                 )
                                  )
                                ),
@@ -1993,6 +2412,14 @@ server <- function(input, output, session) {
   rv <- reactiveValues(
     authenticated  = FALSE,
     officer_name   = "",
+    officer_role   = "officer",
+    officer_user   = "",
+    session_id     = digest::digest(paste0(Sys.time(), runif(1)), algo="md5"),
+    last_activity  = Sys.time(),
+    timeout_warned = FALSE,
+    forecast_cache = NULL,      # cached list of per-county forecast results
+    forecast_built = NULL,      # POSIXct timestamp of last build
+    sf_fc          = NULL,      # sf object for forecast map
     chat_history   = list(),
     cases          = all_cases,
     email_status   = list(),
@@ -2005,8 +2432,56 @@ server <- function(input, output, session) {
     bulk_retries   = 0L,
     cache_size     = length(ls(classify_cache)),
     learning_flash = "",
-    last_db_sync   = Sys.time()   # tracks last successful DB read
+    last_db_sync   = Sys.time()
   )
+  
+  # ── Session timeout ────────────────────────────────────────────
+  # JS sends a ping every 60s on any user interaction (mouse/key/scroll).
+  # Server checks every 60s; locks after SESSION_TIMEOUT minutes of silence.
+  observeEvent(input$activity_ping, {
+    rv$last_activity  <- Sys.time()
+    rv$timeout_warned <- FALSE
+  }, ignoreNULL=TRUE)
+  
+  timeout_timer <- reactiveTimer(60000)  # check every 60 seconds
+  observe({
+    timeout_timer()
+    if (!isolate(rv$authenticated)) return()
+    idle_mins <- as.numeric(difftime(Sys.time(), isolate(rv$last_activity), units="mins"))
+    warn_at   <- SESSION_TIMEOUT - 2L    # warn 2 minutes before lockout
+    
+    if (idle_mins >= SESSION_TIMEOUT) {
+      un <- isolate(rv$officer_user)
+      nm <- isolate(rv$officer_name)
+      audit(un, nm, "TIMEOUT",
+            detail = sprintf("Auto-locked after %d min inactivity", SESSION_TIMEOUT),
+            session_id = isolate(rv$session_id))
+      rv$authenticated  <- FALSE
+      rv$timeout_warned <- FALSE
+      shinyjs::runjs("Shiny.setInputValue('session_locked', true, {priority: 'event'});")
+    } else if (idle_mins >= warn_at && !isolate(rv$timeout_warned)) {
+      rv$timeout_warned <- TRUE
+      mins_left <- SESSION_TIMEOUT - floor(idle_mins)
+      shinyjs::runjs(sprintf(
+        "Shiny.setInputValue('timeout_warning', %d, {priority: 'event'});", mins_left))
+    }
+  })
+  
+  # Show warning toast when approaching timeout
+  observeEvent(input$timeout_warning, {
+    shinyjs::runjs(sprintf(
+      "if(typeof Shiny !== 'undefined') {
+         var b = document.getElementById('timeout_toast');
+         if(!b) {
+           b = document.createElement('div');
+           b.id = 'timeout_toast';
+           b.style = 'position:fixed;bottom:20px;right:20px;z-index:9999;background:#664d03;color:#fff;padding:12px 18px;border-radius:8px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,0.3);';
+           document.body.appendChild(b);
+         }
+         b.innerHTML = '⏱ Session locks in %d minute(s) due to inactivity. Move your mouse to stay active.';
+         setTimeout(function(){ var el=document.getElementById('timeout_toast'); if(el) el.remove(); }, 8000);
+       }", input$timeout_warning))
+  }, ignoreNULL=TRUE)
   
   # ── Cross-session DB sync ──────────────────────────────────────
   # Poll DB every 5 seconds. If another officer validated a case, the DB
@@ -2707,6 +3182,12 @@ server <- function(input, output, session) {
                                    paste0("NCIC ENGINE · ",OPENAI_MODEL)),
                           tags$div(style="display:flex;align-items:center;gap:6px;margin-bottom:5px;flex-wrap:wrap;",
                                    HTML(ncic_badge_html(lvl)),
+                                   # Language detection badge
+                                   if (!is.null(m$lang_label) && !is.na(m$lang_label))
+                                     tags$span(style="background:#e9ecef;color:#374151;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:600;",
+                                               paste0("🌐 ", m$lang_label)) else NULL,
+                                   if (isTRUE(m$lang_is_sheng))
+                                     tags$span(style="background:#fef3c7;color:#92400e;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:700;border:1px solid #fcd34d;","Sheng") else NULL,
                                    if (isTRUE(m$is_activism))
                                      tags$span(style="background:#0d6efd;color:#fff;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:700;","🗣 Activism / Political Critique") else NULL,
                                    if (isTRUE(m$section_13))
@@ -2717,6 +3198,10 @@ server <- function(input, output, session) {
                                      tags$span(style="background:#e9ecef;color:#374151;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:600;",
                                                paste0("Target: ", gsub("_"," ", m$target_type))) else NULL
                           ),
+                          # Language warning banner
+                          if (!is.null(m$lang_warning) && !is.na(m$lang_warning))
+                            tags$div(style="background:#fff8e1;border-left:3px solid #ffc107;border-radius:4px;padding:5px 9px;font-size:11px;margin-bottom:5px;color:#664d03;",
+                                     m$lang_warning) else NULL,
                           tags$div(style="font-size:11px;",
                                    tags$strong("Confidence: "),paste0(m$conf,"% "),HTML(conf_band_html(conf_band(m$conf))),
                                    "  |  ",tags$strong("Category: "),m$category,"  |  ",
@@ -2760,8 +3245,14 @@ server <- function(input, output, session) {
   observeEvent(input$chat_send, {
     req(input$chat_input, nchar(trimws(input$chat_input))>0)
     tw <- trimws(input$chat_input)
+    
+    # ── Detect language before classification ──────────────────
+    lang_det <- tryCatch(detect_language(tw), error=function(e)
+      list(code="unknown", label="Unknown", is_sheng=FALSE,
+           is_mixed=FALSE, low_coverage=FALSE, warning=NA_character_))
+    
     rv$chat_history <- c(rv$chat_history,
-                         list(list(role="user",text=tw)),
+                         list(list(role="user", text=tw)),
                          list(list(role="thinking")))
     updateTextAreaInput(session,"chat_input",value="")
     
@@ -2794,7 +3285,13 @@ server <- function(input, output, session) {
         source_region=      res$source_region       %||% "Unknown",
         target_group=       res$target_group        %||% "None",
         source_history_score= res$source_history_score %||% 0,
-        source_context_note=  res$source_context_note  %||% ""
+        source_context_note=  res$source_context_note  %||% "",
+        # ── Language detection results ──────────────────────────
+        lang_code=        lang_det$code,
+        lang_label=       lang_det$label,
+        lang_is_sheng=    isTRUE(lang_det$is_sheng),
+        lang_is_mixed=    isTRUE(lang_det$is_mixed),
+        lang_warning=     lang_det$warning %||% NA_character_
       )
     }
     rv$chat_history <- hist
@@ -3432,6 +3929,21 @@ server <- function(input, output, session) {
             db_update_case(cid, fields)
           }, error=function(e) message("[db] validation write failed: ", e$message))
           
+          # ── Audit log ─────────────────────────────────────────────
+          audit(rv$officer_user, officer, action_str,
+                case_id    = cid,
+                detail     = sprintf("NCIC L%d → L%d · Risk %d · %s",
+                                     cur_ncic, final_ncic,
+                                     rv$cases$risk_score[rv$cases$case_id==cid][1],
+                                     substr(tweet_val, 1, 60)),
+                session_id = rv$session_id)
+          
+          # ── Auto-enqueue S13 cases ────────────────────────────────
+          if (ncic_s13(final_ncic) && action_str %in% c("CONFIRMED","ESCALATED")) {
+            case_row <- rv$cases[rv$cases$case_id == cid, ][1,]
+            db_s13_enqueue(case_row, officer)
+          }
+          
           # ── Re-score ALL cases with updated weights & persist ─────────
           # Run asynchronously so UI doesn't block
           later::later(function() {
@@ -3628,96 +4140,48 @@ server <- function(input, output, session) {
                      type="message", duration=5)
   })
   
-  # ── Forecast ───────────────────────────────────────────────
+  # ── Forecast ───────────────────────────────────────────────────
   output$forecast_ui <- renderUI({
     if (!rv$authenticated) return(auth_wall_ui())
     
-    d   <- rv$cases
     now <- Sys.time()
     
-    # ── Build per-county forecast ──────────────────────────────
-    # Uses last 30 days to project next 14-day risk trajectory
-    window_days  <- 30
-    forecast_days <- 14
-    cutoff       <- now - as.difftime(window_days, units="days")
-    recent       <- d[!is.na(d$timestamp) & d$timestamp >= cutoff, ]
+    # ── Build / use cached forecasts ──────────────────────────────
+    # Rebuild if cache is empty or older than 30 minutes
+    needs_rebuild <- is.null(rv$forecast_cache) ||
+      is.null(rv$forecast_built) ||
+      as.numeric(difftime(now, rv$forecast_built, units="mins")) > 30
     
-    county_fc <- do.call(rbind, lapply(counties$name, function(co) {
-      h  <- recent[recent$county == co, ]
-      all_co <- d[d$county == co, ]
-      
-      # Historical baseline
-      n_recent    <- nrow(h)
-      avg_risk    <- if (n_recent > 0) round(mean(h$risk_score, na.rm=TRUE), 0) else 0
-      avg_ncic    <- if (n_recent > 0) round(mean(h$ncic_level,  na.rm=TRUE), 1) else 0
-      n_high      <- sum(h$ncic_level >= 4, na.rm=TRUE)
-      n_s13       <- sum(isTRUE(h$section_13), na.rm=TRUE)
-      top_platform<- if (n_recent > 0) names(sort(table(h$platform), decreasing=TRUE))[1] else "—"
-      top_category<- if (n_recent > 0) names(sort(table(h$category), decreasing=TRUE))[1] else "—"
-      
-      # Trend: compare last 7 days vs prior 7 days
-      w1 <- h[h$timestamp >= now - as.difftime(7,  units="days"), ]
-      w2 <- h[h$timestamp >= now - as.difftime(14, units="days") &
-                h$timestamp <  now - as.difftime(7,  units="days"), ]
-      risk_w1 <- if (nrow(w1) > 0) mean(w1$risk_score, na.rm=TRUE) else NA
-      risk_w2 <- if (nrow(w2) > 0) mean(w2$risk_score, na.rm=TRUE) else NA
-      trend   <- if (!is.na(risk_w1) && !is.na(risk_w2) && risk_w2 > 0)
-        round((risk_w1 - risk_w2) / risk_w2 * 100, 0)
-      else 0
-      
-      # Velocity: avg new signals per day in last 7d
-      velocity <- if (nrow(w1) > 0) round(nrow(w1) / 7, 1) else 0
-      
-      # Escalation score: weighted combination for forecast
-      escalation_score <- min(100, round(
-        avg_risk * 0.35 +
-          avg_ncic * 8   +
-          n_high   * 3   +
-          max(0, trend)  * 0.5 +
-          velocity       * 4
-      ))
-      
-      # Forecast level
-      forecast_level <- if (escalation_score >= 70) "CRITICAL"  else
-        if (escalation_score >= 50) "HIGH"       else
-          if (escalation_score >= 30) "ELEVATED"   else
-            if (escalation_score >  0)  "MONITORED"  else "STABLE"
-      
-      # Drivers
-      drivers <- c(
-        if (avg_ncic >= 3.5)  "High avg NCIC level"        else NULL,
-        if (n_high >= 3)      paste0(n_high," L4+ cases")  else NULL,
-        if (trend  > 20)      paste0("↑",trend,"% trend")  else NULL,
-        if (velocity > 2)     paste0(velocity," signals/day") else NULL,
-        if (n_s13  > 0)       paste0(n_s13," S13 cases")   else NULL
-      )
-      
+    if (needs_rebuild) {
+      withProgress(message="Fitting Prophet models…", value=0.1, {
+        rv$forecast_cache <- build_county_forecasts(rv$cases, now)
+        rv$forecast_built <- now
+        setProgress(1)
+      })
+    }
+    
+    fc_list    <- rv$forecast_cache
+    county_fc  <- do.call(rbind, lapply(fc_list, function(r) {
       data.frame(
-        county=co, n_recent=n_recent, avg_risk=avg_risk, avg_ncic=avg_ncic,
-        n_high=n_high, n_s13=n_s13, trend=trend, velocity=velocity,
-        escalation_score=escalation_score, forecast_level=forecast_level,
-        top_platform=top_platform, top_category=top_category,
-        drivers=if(length(drivers)>0) paste(drivers,collapse=" · ") else "No strong signals",
+        county=r$county, n_recent=r$n_recent, avg_risk=r$avg_risk,
+        avg_ncic=r$avg_ncic, n_high=r$n_high, n_s13=r$n_s13,
+        trend=r$trend, top_platform=r$top_platform, top_category=r$top_category,
+        escalation_score=r$escalation_score, forecast_level=r$forecast_level,
+        drivers=r$drivers, prophet_used=r$prophet_used,
         stringsAsFactors=FALSE
       )
     }))
     
-    # ── Colour palette for forecast levels ────────────────────
+    n_prophet  <- sum(county_fc$prophet_used, na.rm=TRUE)
+    n_heuristic<- nrow(county_fc) - n_prophet
+    
+    # ── Colour helpers ────────────────────────────────────────────
     fc_col <- function(lvl) switch(lvl,
-                                   CRITICAL  = "#7b0000",
-                                   HIGH      = "#dc3545",
-                                   ELEVATED  = "#fd7e14",
-                                   MONITORED = "#ffc107",
-                                   STABLE    = "#198754",
-                                   "#dee2e6"
-    )
+                                   CRITICAL  = "#7b0000", HIGH     = "#dc3545",
+                                   ELEVATED  = "#fd7e14", MONITORED= "#ffc107",
+                                   STABLE    = "#198754", "#dee2e6")
     
-    fc_pal <- colorNumeric(
-      palette = c("#198754","#ffc107","#fd7e14","#dc3545","#7b0000"),
-      domain  = c(0, 100), na.color="#dee2e6"
-    )
-    
-    # ── Build sf_data for tmap ────────────────────────────────
+    # ── sf join for tmap ─────────────────────────────────────────
     sf_fc <- KENYA_SF |>
       left_join(county_fc, by=c("name"="county")) |>
       mutate(
@@ -3725,26 +4189,82 @@ server <- function(input, output, session) {
         forecast_level   = ifelse(is.na(forecast_level), "STABLE", forecast_level),
         n_recent         = ifelse(is.na(n_recent), 0L, n_recent),
         avg_risk         = ifelse(is.na(avg_risk),  0L, avg_risk),
-        drivers          = ifelse(is.na(drivers), "Insufficient data", drivers)
+        drivers          = ifelse(is.na(drivers), "Insufficient data", drivers),
+        prophet_used     = ifelse(is.na(prophet_used), FALSE, prophet_used)
       )
     
-    # ── Summary KPIs ─────────────────────────────────────────
+    # store sf_fc so renderTmap can access it
+    rv$sf_fc <- sf_fc
+    
+    # ── KPIs ─────────────────────────────────────────────────────
     n_critical <- sum(county_fc$forecast_level == "CRITICAL",  na.rm=TRUE)
     n_high_fc  <- sum(county_fc$forecast_level == "HIGH",      na.rm=TRUE)
     n_elevated <- sum(county_fc$forecast_level == "ELEVATED",  na.rm=TRUE)
     top_county <- county_fc$county[which.max(county_fc$escalation_score)]
     
+    # ── Prophet trend chart for top county ───────────────────────
+    top_fc     <- fc_list[[which(sapply(fc_list, `[[`, "county") == top_county)]]
+    trend_plot <- NULL
+    if (!is.null(top_fc$forecast_df) && !is.null(top_fc$hist_df)) {
+      hist  <- top_fc$hist_df
+      fcast <- top_fc$forecast_df
+      fcast_future <- fcast[fcast$ds > max(hist$ds), ]
+      
+      trend_plot <- plot_ly() |>
+        add_ribbons(data=fcast_future,
+                    x=~ds, ymin=~yhat_lower, ymax=~yhat_upper,
+                    fillcolor="rgba(220,53,69,0.12)", line=list(color="transparent"),
+                    name="80% CI", showlegend=TRUE) |>
+        add_lines(data=fcast,
+                  x=~ds, y=~yhat,
+                  line=list(color="#dc3545", width=2, dash="dash"),
+                  name="Prophet forecast") |>
+        add_lines(data=hist,
+                  x=~ds, y=~y,
+                  line=list(color="#0066cc", width=2),
+                  name="Historical risk") |>
+        layout(
+          title      = list(text=paste0("<b>", top_county, "</b> — 14-Day Risk Forecast"),
+                            font=list(size=13), x=0),
+          xaxis      = list(title="", showgrid=FALSE),
+          yaxis      = list(title="Avg Risk Score", range=c(0,100),
+                            gridcolor="#f0f0f0"),
+          legend     = list(orientation="h", y=-0.2, font=list(size=11)),
+          paper_bgcolor = "rgba(0,0,0,0)",
+          plot_bgcolor  = "rgba(0,0,0,0)",
+          margin     = list(t=40, r=10, b=10, l=40),
+          hovermode  = "x unified"
+        ) |>
+        config(displayModeBar=FALSE)
+    }
+    
     tagList(
-      # Header
-      tags$div(style="margin-bottom:16px;",
-               tags$h5(style="font-weight:700;color:#1a1a2e;margin-bottom:4px;",
-                       tagList(bs_icon("graph-up-arrow")," 14-Day Risk Forecast")),
-               tags$p(style="font-size:12px;color:#6c757d;margin:0;",
-                      paste0("Based on signals from last 30 days · Generated ",
-                             format(now,"%d %b %Y %H:%M")," EAT · County-level escalation model"))
+      # ── Header ───────────────────────────────────────────────────
+      tags$div(style="margin-bottom:16px;display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px;",
+               tags$div(
+                 tags$h5(style="font-weight:700;color:#1a1a2e;margin-bottom:4px;",
+                         tagList(bs_icon("graph-up-arrow"), " 14-Day Risk Forecast")),
+                 tags$p(style="font-size:12px;color:#6c757d;margin:0;",
+                        paste0("Prophet time-series models · Generated ",
+                               format(now, "%d %b %Y %H:%M"), " EAT · ",
+                               n_prophet, " counties fitted · ", n_heuristic, " heuristic fallback"))
+               ),
+               actionButton("btn_rebuild_forecast",
+                            tagList(bs_icon("arrow-clockwise"), " Rebuild Models"),
+                            class="btn btn-outline-secondary btn-sm",
+                            style="font-size:11px;")
       ),
       
-      # KPI row
+      # ── Model coverage badge ──────────────────────────────────────
+      tags$div(style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;",
+               tags$span(style="background:#d1fae5;color:#065f46;border:1px solid #6ee7b7;border-radius:4px;padding:3px 10px;font-size:11px;font-weight:600;",
+                         paste0("✓ ", n_prophet, " Prophet models fitted")),
+               if (n_heuristic > 0)
+                 tags$span(style="background:#fff8e1;color:#664d03;border:1px solid #fcd34d;border-radius:4px;padding:3px 10px;font-size:11px;font-weight:600;",
+                           paste0("⚠ ", n_heuristic, " heuristic fallback (insufficient data)"))
+      ),
+      
+      # ── KPI row ──────────────────────────────────────────────────
       tags$div(style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;",
                tags$div(style="background:#7b0000;border-radius:8px;padding:10px 14px;color:#fff;",
                         tags$div(style="font-size:10px;font-weight:700;text-transform:uppercase;opacity:.85;","Critical Risk"),
@@ -3766,105 +4286,151 @@ server <- function(input, output, session) {
       
       layout_columns(col_widths=c(8,4),
                      
-                     # ── Forecast map ────────────────────────────────────────
-                     card(full_screen=TRUE,
-                          card_header(tagList(bs_icon("map")," Forecast Risk Map · hover for details · click for full analysis")),
-                          tags$div(style="height:460px;",
-                                   tmapOutput("forecast_map", height="460px")
-                          )
+                     # ── Left: map + trend chart ──────────────────────────────
+                     tagList(
+                       card(full_screen=TRUE,
+                            card_header(tagList(bs_icon("map"),
+                                                " Forecast Risk Map · hover for details")),
+                            tags$div(style="height:380px;",
+                                     tmapOutput("forecast_map", height="380px"))
+                       ),
+                       if (!is.null(trend_plot))
+                         card(style="margin-top:10px;",
+                              card_header(
+                                tagList(bs_icon("graph-up"), " Prophet Forecast — ",
+                                        tags$span(style="color:#dc3545;", top_county)),
+                                tags$div(style="float:right;",
+                                         selectInput("forecast_county_select", NULL,
+                                                     choices  = setNames(counties$name, counties$name),
+                                                     selected = top_county,
+                                                     width    = "160px"))
+                              ),
+                              tags$div(style="height:240px;",
+                                       plotlyOutput("forecast_trend_plot", height="240px"))
+                         )
                      ),
                      
-                     # ── County ranking table ─────────────────────────────────
+                     # ── Right: county ranking ────────────────────────────────
                      card(
-                       card_header(tagList(bs_icon("sort-down")," County Risk Ranking")),
-                       tags$div(style="max-height:480px;overflow-y:auto;",
+                       card_header(tagList(bs_icon("sort-down"), " County Risk Ranking")),
+                       tags$div(style="max-height:640px;overflow-y:auto;",
                                 lapply(seq_len(nrow(county_fc[order(-county_fc$escalation_score),])), function(i) {
                                   row <- county_fc[order(-county_fc$escalation_score),][i,]
                                   col <- fc_col(row$forecast_level)
                                   tags$div(
                                     style=paste0("display:flex;align-items:center;gap:8px;padding:7px 10px;",
                                                  "border-bottom:1px solid #f0f0f0;"),
-                                    tags$div(style=paste0("min-width:22px;font-size:11px;font-weight:700;color:#6c757d;"),
-                                             paste0("#",i)),
+                                    tags$div(style="min-width:22px;font-size:11px;font-weight:700;color:#6c757d;",
+                                             paste0("#", i)),
                                     tags$div(style="flex:1;",
-                                             tags$div(style="font-size:12px;font-weight:700;color:#1a1a2e;", row$county),
-                                             tags$div(style="font-size:10px;color:#6c757d;", row$drivers)
+                                             tags$div(style="display:flex;align-items:center;gap:5px;",
+                                                      tags$div(style="font-size:12px;font-weight:700;color:#1a1a2e;", row$county),
+                                                      if (isTRUE(row$prophet_used))
+                                                        tags$span(style="font-size:9px;background:#d1fae5;color:#065f46;border-radius:2px;padding:0 4px;font-weight:600;","P")
+                                                      else
+                                                        tags$span(style="font-size:9px;background:#fff8e1;color:#664d03;border-radius:2px;padding:0 4px;font-weight:600;","H")
+                                             ),
+                                             tags$div(style="font-size:10px;color:#6c757d;margin-top:1px;", row$drivers)
                                     ),
                                     tags$div(
                                       tags$span(style=paste0("background:",col,";color:",
                                                              if(row$forecast_level=="MONITORED") "#1a1a2e" else "#fff",
                                                              ";border-radius:4px;padding:2px 7px;font-size:10px;font-weight:700;"),
                                                 row$forecast_level),
-                                      tags$div(style=paste0("font-size:13px;font-weight:800;color:",col,
+                                      tags$div(style=paste0("font-size:13px;font-weight:800;color:", col,
                                                             ";text-align:right;margin-top:1px;"),
                                                row$escalation_score)
                                     )
                                   )
                                 })
-                       )
+                       ),
+                       tags$div(style="padding:8px 10px;font-size:10px;color:#9ca3af;border-top:1px solid #f0f0f0;",
+                                tags$span(style="background:#d1fae5;color:#065f46;border-radius:2px;padding:0 4px;font-weight:600;margin-right:4px;","P"),
+                                "Prophet fitted  ",
+                                tags$span(style="background:#fff8e1;color:#664d03;border-radius:2px;padding:0 4px;font-weight:600;margin-right:4px;","H"),
+                                "Heuristic fallback")
                      )
       ),
       
-      # ── Methodology note ──────────────────────────────────────
-      tags$div(style="margin-top:12px;background:#f8f9fa;border-radius:8px;padding:10px 14px;font-size:11px;color:#6c757d;border-left:3px solid #0066cc;",
+      # ── Methodology note ─────────────────────────────────────────
+      tags$div(style="margin-top:12px;background:#f8f9fa;border-radius:8px;padding:10px 14px;font-size:11px;color:#6c757d;border-left:3px solid #7c3aed;",
                tags$strong("Forecast Methodology: "),
-               "Escalation score = 0.35×avg_risk + 8×avg_NCIC + 3×L4+_count + 0.5×7d_trend% + 4×velocity(signals/day). ",
-               "Forecast window: 14 days. Training window: 30 days of historical signals. ",
-               "This is a statistical projection — all forecasts require officer review before operational action."
+               paste0("Per-county Prophet time-series models fitted on daily mean risk scores over a 30-day training window. ",
+                      "Weekly seasonality enabled; changepoint prior scale = 0.15 (moderate flexibility). ",
+                      "Escalation score = mean yhat_upper over the 14-day forecast horizon, capped 0–100. ",
+                      "Counties with fewer than ", MIN_PROPHET_OBS, " days of data fall back to a weighted heuristic. ",
+                      "80% confidence intervals shown. All projections require officer review before operational action.")
       )
     )
   })
   
-  # ── Forecast map renderTmap (cannot nest inside renderUI) ──────
+  # ── Rebuild forecast button ────────────────────────────────────
+  observeEvent(input$btn_rebuild_forecast, {
+    rv$forecast_cache <- NULL
+    rv$forecast_built <- NULL
+  })
+  
+  # ── Prophet trend chart output ─────────────────────────────────
+  output$forecast_trend_plot <- renderPlotly({
+    req(rv$forecast_cache)
+    county_fc_names <- sapply(rv$forecast_cache, `[[`, "county")
+    esc_scores      <- sapply(rv$forecast_cache, `[[`, "escalation_score")
+    
+    # Use selected county if available, otherwise top county
+    sel_county <- input$forecast_county_select %||%
+      county_fc_names[which.max(esc_scores)]
+    if (!sel_county %in% county_fc_names)
+      sel_county <- county_fc_names[which.max(esc_scores)]
+    
+    top_fc <- rv$forecast_cache[[which(county_fc_names == sel_county)]]
+    
+    # Fallback message if no Prophet model for this county
+    if (is.null(top_fc$forecast_df) || is.null(top_fc$hist_df)) {
+      return(plot_ly() |>
+               layout(
+                 title      = list(text=paste0("<b>", sel_county,
+                                               "</b> — Insufficient data for Prophet model (heuristic used)"),
+                                   font=list(size=12), x=0),
+                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
+               ) |> config(displayModeBar=FALSE))
+    }
+    
+    hist         <- top_fc$hist_df
+    fcast        <- top_fc$forecast_df
+    fcast_future <- fcast[fcast$ds > max(hist$ds), ]
+    
+    plot_ly() |>
+      add_ribbons(data=fcast_future,
+                  x=~ds, ymin=~yhat_lower, ymax=~yhat_upper,
+                  fillcolor="rgba(220,53,69,0.12)", line=list(color="transparent"),
+                  name="80% CI", showlegend=TRUE) |>
+      add_lines(data=fcast,
+                x=~ds, y=~yhat,
+                line=list(color="#dc3545", width=2, dash="dash"),
+                name="Prophet forecast") |>
+      add_lines(data=hist,
+                x=~ds, y=~y,
+                line=list(color="#0066cc", width=2),
+                name="Historical risk") |>
+      layout(
+        title      = list(text=paste0("<b>", sel_county, "</b> — 14-Day Risk Forecast"),
+                          font=list(size=12), x=0),
+        xaxis      = list(title="", showgrid=FALSE),
+        yaxis      = list(title="Avg Risk Score", range=c(0,100),
+                          gridcolor="#f0f0f0"),
+        legend     = list(orientation="h", y=-0.25, font=list(size=11)),
+        paper_bgcolor = "rgba(0,0,0,0)",
+        plot_bgcolor  = "rgba(0,0,0,0)",
+        margin     = list(t=30, r=10, b=10, l=40),
+        hovermode  = "x unified"
+      ) |>
+      config(displayModeBar=FALSE)
+  })
+  
+  # ── Forecast map renderTmap ────────────────────────────────────
   output$forecast_map <- renderTmap({
-    d      <- rv$cases
-    now    <- Sys.time()
-    cutoff <- now - as.difftime(30, units="days")
-    recent <- d[!is.na(d$timestamp) & d$timestamp >= cutoff, ]
-    
-    county_fc <- do.call(rbind, lapply(counties$name, function(co) {
-      h            <- recent[recent$county == co, ]
-      n_recent     <- nrow(h)
-      avg_risk     <- if (n_recent>0) round(mean(h$risk_score, na.rm=TRUE),0) else 0
-      avg_ncic     <- if (n_recent>0) round(mean(h$ncic_level,  na.rm=TRUE),1) else 0
-      n_high       <- sum(h$ncic_level >= 4, na.rm=TRUE)
-      n_s13        <- sum(isTRUE(h$section_13), na.rm=TRUE)
-      top_platform <- if (n_recent>0) names(sort(table(h$platform),decreasing=TRUE))[1] else "—"
-      top_category <- if (n_recent>0) names(sort(table(h$category),decreasing=TRUE))[1] else "—"
-      w1      <- h[h$timestamp >= now - as.difftime(7,  units="days"), ]
-      w2      <- h[h$timestamp >= now - as.difftime(14, units="days") &
-                     h$timestamp <  now - as.difftime(7,  units="days"), ]
-      r1      <- if (nrow(w1)>0) mean(w1$risk_score,na.rm=TRUE) else NA
-      r2      <- if (nrow(w2)>0) mean(w2$risk_score,na.rm=TRUE) else NA
-      trend   <- if (!is.na(r1)&&!is.na(r2)&&r2>0) round((r1-r2)/r2*100,0) else 0
-      velocity<- if (nrow(w1)>0) round(nrow(w1)/7,1) else 0
-      esc     <- min(100,round(avg_risk*0.35+avg_ncic*8+n_high*3+max(0,trend)*0.5+velocity*4))
-      lvl     <- if(esc>=70)"CRITICAL" else if(esc>=50)"HIGH" else
-        if(esc>=30)"ELEVATED" else if(esc>0)"MONITORED" else "STABLE"
-      drv <- paste(c(if(avg_ncic>=3.5)"High avg NCIC" else NULL,
-                     if(n_high>=3) paste0(n_high," L4+") else NULL,
-                     if(trend>20)  paste0("\u2191",trend,"% trend") else NULL,
-                     if(velocity>2)paste0(velocity," sig/day") else NULL,
-                     if(n_s13>0)  paste0(n_s13," S13") else NULL),
-                   collapse=" \u00b7 ")
-      if(nchar(drv)==0) drv <- "No strong signals"
-      data.frame(county=co,n_recent=n_recent,avg_risk=avg_risk,avg_ncic=avg_ncic,
-                 n_high=n_high,n_s13=n_s13,trend=trend,velocity=velocity,
-                 escalation_score=esc,forecast_level=lvl,
-                 top_platform=top_platform,top_category=top_category,
-                 drivers=drv,stringsAsFactors=FALSE)
-    }))
-    
-    sf_fc <- KENYA_SF |>
-      left_join(county_fc, by=c("name"="county")) |>
-      mutate(
-        escalation_score = ifelse(is.na(escalation_score), 0L, escalation_score),
-        forecast_level   = ifelse(is.na(forecast_level), "STABLE", forecast_level),
-        n_recent         = ifelse(is.na(n_recent), 0L, n_recent),
-        avg_risk         = ifelse(is.na(avg_risk),  0L, avg_risk),
-        drivers          = ifelse(is.na(drivers), "Insufficient data", drivers)
-      )
-    
+    req(rv$sf_fc)
+    sf_fc <- rv$sf_fc
     tm_shape(sf_fc) +
       tm_polygons(
         col        = "escalation_score",
@@ -3873,7 +4439,7 @@ server <- function(input, output, session) {
         labels     = c("Stable","Monitored","Elevated","High","Critical"),
         colorNA    = "#dee2e6",
         textNA     = "Insufficient data",
-        title      = "14-Day Forecast Risk",
+        title      = "14-Day Prophet Forecast Risk",
         border.col = "#ffffff",
         border.lwd = 1.2,
         alpha      = 0.85,
@@ -3881,6 +4447,7 @@ server <- function(input, output, session) {
         popup.vars = c(
           "Forecast Level"   = "forecast_level",
           "Escalation Score" = "escalation_score",
+          "Prophet Fitted"   = "prophet_used",
           "Signals (30d)"    = "n_recent",
           "Avg Risk Score"   = "avg_risk",
           "Avg NCIC Level"   = "avg_ncic",
@@ -4089,16 +4656,470 @@ server <- function(input, output, session) {
   
   # ── Auth ───────────────────────────────────────────────────
   observeEvent(input$auth_submit, {
-    nm <- trimws(input$auth_name %||% "")
-    if (nchar(nm)==0) {
-      shinyjs::html("auth_error","❌ Please enter your name.")
+    nm <- trimws(input$auth_name     %||% "")
+    un <- trimws(input$auth_username %||% "")
+    pw <- input$auth_password        %||% ""
+    
+    if (nchar(nm) == 0) {
+      shinyjs::html("auth_error", "❌ Please enter your full name.")
       return()
     }
-    if (isTRUE(input$auth_password==OFFICER_PASSWORD)) {
-      rv$authenticated <- TRUE
-      rv$officer_name  <- nm
+    if (nchar(un) == 0) {
+      shinyjs::html("auth_error", "❌ Please enter your username.")
+      return()
+    }
+    
+    result <- db_check_password(un, pw)
+    
+    if (isTRUE(result$ok)) {
+      rv$authenticated  <- TRUE
+      rv$officer_name   <- nm
+      rv$officer_user   <- un
+      rv$officer_role   <- result$role
+      rv$last_activity  <- Sys.time()
+      rv$timeout_warned <- FALSE
+      shinyjs::html("auth_error", "")
+      audit(un, nm, "LOGIN",
+            detail     = paste0("Role: ", result$role),
+            session_id = rv$session_id)
     } else {
-      shinyjs::html("auth_error","❌ Invalid access code.")
+      audit(un, nm, "LOGIN_FAILED",
+            detail     = "Invalid credentials",
+            session_id = rv$session_id)
+      shinyjs::html("auth_error", "❌ Invalid username or password.")
+    }
+  })
+  
+  # ── S13 Escalation Queue UI ───────────────────────────────────
+  output$s13_ui <- renderUI({
+    if (!rv$authenticated) return(auth_wall_ui())
+    
+    queue <- db_s13_load()
+    
+    # Status counts
+    n_pending <- sum(queue$status == "PENDING",     na.rm=TRUE)
+    n_filed   <- sum(queue$status == "FILED",       na.rm=TRUE)
+    n_dci     <- sum(queue$status == "DCI_ALERTED", na.rm=TRUE)
+    n_resolved<- sum(queue$status == "RESOLVED",    na.rm=TRUE)
+    
+    status_col <- function(s) switch(s,
+                                     PENDING     = "#dc3545",
+                                     FILED       = "#fd7e14",
+                                     DCI_ALERTED = "#7c3aed",
+                                     RESOLVED    = "#198754",
+                                     "#6c757d")
+    
+    status_label <- function(s) switch(s,
+                                       PENDING     = "⏳ PENDING",
+                                       FILED       = "📄 FILED",
+                                       DCI_ALERTED = "🚔 DCI ALERTED",
+                                       RESOLVED    = "✅ RESOLVED",
+                                       s)
+    
+    tagList(
+      # ── Header ────────────────────────────────────────────────
+      tags$div(style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px;",
+               tags$div(
+                 tags$h4(style="font-weight:800;color:#1a1a2e;margin:0 0 4px;font-size:16px;",
+                         tagList(bs_icon("exclamation-octagon"), " Section 13 Escalation Queue")),
+                 tags$p(style="font-size:12px;color:#6c757d;margin:0;",
+                        "Confirmed L4/L5 cases requiring legal action under NCIC Act Cap 170, Section 13.")
+               ),
+               tags$span(style="background:#dc3545;color:#fff;border-radius:4px;padding:4px 12px;font-size:12px;font-weight:700;align-self:center;",
+                         paste0("⚖ Section 13 Active"))
+      ),
+      
+      # ── KPI row ───────────────────────────────────────────────
+      layout_columns(col_widths=c(3,3,3,3),
+                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-top:3px solid #dc3545;border-radius:8px;padding:12px 16px;text-align:center;",
+                              tags$div(style="font-size:26px;font-weight:800;color:#dc3545;", n_pending),
+                              tags$div(style="font-size:11px;color:#6c757d;text-transform:uppercase;letter-spacing:.05em;","Pending Action")),
+                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-top:3px solid #fd7e14;border-radius:8px;padding:12px 16px;text-align:center;",
+                              tags$div(style="font-size:26px;font-weight:800;color:#fd7e14;", n_filed),
+                              tags$div(style="font-size:11px;color:#6c757d;text-transform:uppercase;letter-spacing:.05em;","Filed")),
+                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-top:3px solid #7c3aed;border-radius:8px;padding:12px 16px;text-align:center;",
+                              tags$div(style="font-size:26px;font-weight:800;color:#7c3aed;", n_dci),
+                              tags$div(style="font-size:11px;color:#6c757d;text-transform:uppercase;letter-spacing:.05em;","DCI Alerted")),
+                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-top:3px solid #198754;border-radius:8px;padding:12px 16px;text-align:center;",
+                              tags$div(style="font-size:26px;font-weight:800;color:#198754;", n_resolved),
+                              tags$div(style="font-size:11px;color:#6c757d;text-transform:uppercase;letter-spacing:.05em;","Resolved"))
+      ),
+      
+      tags$div(style="margin-top:16px;",
+               
+               if (nrow(queue) == 0) {
+                 tags$div(
+                   style="text-align:center;padding:48px;background:#fff;border-radius:12px;border:1px solid #dee2e6;",
+                   tags$div(style="font-size:48px;margin-bottom:12px;","⚖"),
+                   tags$h5("No Section 13 cases in queue", style="font-weight:700;color:#1a1a2e;"),
+                   tags$p(style="font-size:13px;color:#6c757d;",
+                          "Cases are auto-added when an officer CONFIRMS or ESCALATES an L4/L5 classification.")
+                 )
+               } else {
+                 tagList(
+                   # ── Filter row ──────────────────────────────────────
+                   tags$div(style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;",
+                            selectInput("s13_filter_status", NULL,
+                                        choices  = c("All Statuses","PENDING","FILED","DCI_ALERTED","RESOLVED"),
+                                        selected = "All Statuses", width="160px"),
+                            selectInput("s13_filter_county", NULL,
+                                        choices  = c("All Counties", sort(unique(queue$county))),
+                                        selected = "All Counties", width="160px"),
+                            downloadButton("dl_s13_queue",
+                                           tagList(bs_icon("download"), " Export"),
+                                           style="background:#dc3545;color:#fff;border:none;border-radius:6px;font-weight:600;font-size:12px;padding:6px 14px;")
+                   ),
+                   
+                   # ── Case cards ──────────────────────────────────────
+                   uiOutput("s13_cards")
+                 )
+               }
+      )
+    )
+  })
+  
+  # ── S13 case cards (reactive to filters) ──────────────────────
+  output$s13_cards <- renderUI({
+    queue <- db_s13_load()
+    if (nrow(queue) == 0) return(NULL)
+    
+    # Apply filters
+    sf <- input$s13_filter_status %||% "All Statuses"
+    cf <- input$s13_filter_county %||% "All Counties"
+    if (sf != "All Statuses") queue <- queue[queue$status == sf, ]
+    if (cf != "All Counties") queue <- queue[queue$county  == cf, ]
+    
+    if (nrow(queue) == 0)
+      return(tags$p(style="color:#6c757d;font-size:13px;padding:16px;","No cases match the selected filters."))
+    
+    status_col <- function(s) switch(s,
+                                     PENDING="dc3545", FILED="fd7e14", DCI_ALERTED="7c3aed", RESOLVED="198754", "6c757d")
+    
+    status_label <- function(s) switch(s,
+                                       PENDING="⏳ PENDING", FILED="📄 FILED",
+                                       DCI_ALERTED="🚔 DCI ALERTED", RESOLVED="✅ RESOLVED", s)
+    
+    tags$div(style="display:flex;flex-direction:column;gap:10px;",
+             lapply(seq_len(nrow(queue)), function(i) {
+               r   <- queue[i,]
+               sc  <- status_col(r$status)
+               nc  <- sub("#","",ncic_color(r$ncic_level))
+               bid <- paste0("s13_btn_", r$id)
+               
+               tags$div(
+                 style=paste0("background:#fff;border:1px solid #dee2e6;border-left:5px solid #",
+                              sc, ";border-radius:8px;padding:14px 16px;"),
+                 # Top row
+                 tags$div(style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px;",
+                          tags$div(
+                            tags$div(style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;",
+                                     tags$span(style=paste0("background:#",nc,";color:#fff;border-radius:3px;padding:1px 8px;font-size:11px;font-weight:700;"),
+                                               paste0("L", r$ncic_level, " — ", ncic_name(r$ncic_level))),
+                                     tags$span(style=paste0("background:#",sc,"18;color:#",sc,";border:1px solid #",sc,"44;",
+                                                            "border-radius:3px;padding:1px 8px;font-size:11px;font-weight:700;"),
+                                               status_label(r$status)),
+                                     tags$span(style="background:#f0f4f8;color:#374151;border-radius:3px;padding:1px 8px;font-size:11px;font-weight:600;",
+                                               paste0("Risk: ", r$risk_score)),
+                                     tags$span(style="font-family:'IBM Plex Mono';font-size:10px;color:#6c757d;",
+                                               r$case_id)
+                            ),
+                            tags$div(style="font-size:12px;color:#374151;line-height:1.6;",
+                                     tags$strong(r$county), " · ", r$platform,
+                                     if (!is.na(r$target_group) && nchar(r$target_group)>0)
+                                       paste0(" · Target: ", r$target_group) else "")
+                          ),
+                          tags$div(style="font-size:11px;color:#6c757d;text-align:right;flex-shrink:0;",
+                                   tags$div(paste0("Filed: ", r$created_at)),
+                                   if (!is.na(r$validated_by)) tags$div(paste0("Officer: ", r$validated_by)) else NULL,
+                                   if (!is.na(r$dci_ref)&&nchar(r$dci_ref)>0)
+                                     tags$div(style="color:#7c3aed;font-weight:600;",
+                                              paste0("DCI Ref: ", r$dci_ref)) else NULL)
+                 ),
+                 # Post text
+                 tags$div(style="background:#f8f9fa;border-radius:4px;padding:8px 10px;font-size:12px;color:#374151;line-height:1.6;margin-bottom:10px;font-style:italic;",
+                          paste0('"', r$tweet_text, '"')),
+                 # Notes
+                 if (!is.na(r$notes) && nchar(r$notes)>0)
+                   tags$div(style="font-size:11px;color:#6c757d;margin-bottom:8px;",
+                            tags$strong("Notes: "), r$notes) else NULL,
+                 # Action buttons (officers can update status)
+                 tags$div(style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;",
+                          if (r$status == "PENDING")
+                            actionButton(paste0("s13_file_",r$id),
+                                         tagList(bs_icon("file-earmark-text"), " Mark Filed"),
+                                         class="btn btn-sm",
+                                         style="background:#fd7e14;color:#fff;border:none;font-size:11px;font-weight:600;") else NULL,
+                          if (r$status %in% c("PENDING","FILED"))
+                            actionButton(paste0("s13_dci_",r$id),
+                                         tagList(bs_icon("shield-exclamation"), " DCI Alerted"),
+                                         class="btn btn-sm",
+                                         style="background:#7c3aed;color:#fff;border:none;font-size:11px;font-weight:600;") else NULL,
+                          if (r$status != "RESOLVED")
+                            actionButton(paste0("s13_resolve_",r$id),
+                                         tagList(bs_icon("check-circle"), " Resolve"),
+                                         class="btn btn-sm",
+                                         style="background:#198754;color:#fff;border:none;font-size:11px;font-weight:600;") else NULL,
+                          tags$span(style="font-size:10px;color:#9ca3af;margin-left:4px;",
+                                    paste0("Updated: ", r$updated_at))
+                 )
+               )
+             })
+    )
+  })
+  
+  # ── S13 status button observers ────────────────────────────────
+  observe({
+    queue <- db_s13_load()
+    for (i in seq_len(nrow(queue))) {
+      local({
+        rid <- queue$id[i]
+        # FILE
+        fid <- paste0("s13_file_", rid)
+        if (!exists(fid, envir=observer_registry)) {
+          assign(fid, TRUE, envir=observer_registry)
+          observeEvent(input[[fid]], {
+            db_s13_update_status(rid, "FILED")
+            audit(rv$officer_user, rv$officer_name, "S13_FILED",
+                  case_id=queue$case_id[queue$id==rid][1],
+                  session_id=rv$session_id)
+            showNotification("Case marked as Filed.", type="message")
+          }, ignoreInit=TRUE)
+        }
+        # DCI
+        did <- paste0("s13_dci_", rid)
+        if (!exists(did, envir=observer_registry)) {
+          assign(did, TRUE, envir=observer_registry)
+          observeEvent(input[[did]], {
+            db_s13_update_status(rid, "DCI_ALERTED")
+            audit(rv$officer_user, rv$officer_name, "S13_DCI_ALERTED",
+                  case_id=queue$case_id[queue$id==rid][1],
+                  session_id=rv$session_id)
+            showNotification("DCI alert status recorded.", type="warning")
+          }, ignoreInit=TRUE)
+        }
+        # RESOLVE
+        rsid <- paste0("s13_resolve_", rid)
+        if (!exists(rsid, envir=observer_registry)) {
+          assign(rsid, TRUE, envir=observer_registry)
+          observeEvent(input[[rsid]], {
+            db_s13_update_status(rid, "RESOLVED")
+            audit(rv$officer_user, rv$officer_name, "S13_RESOLVED",
+                  case_id=queue$case_id[queue$id==rid][1],
+                  session_id=rv$session_id)
+            showNotification("Case resolved.", type="message")
+          }, ignoreInit=TRUE)
+        }
+      })
+    }
+  })
+  
+  # ── S13 CSV export ─────────────────────────────────────────────
+  output$dl_s13_queue <- downloadHandler(
+    filename = function() paste0("EWS_S13_Queue_", Sys.Date(), ".csv"),
+    content  = function(file) write.csv(db_s13_load(), file, row.names=FALSE)
+  )
+  
+  # ── Audit Log UI (admin only) ──────────────────────────────────
+  output$audit_ui <- renderUI({
+    if (!rv$authenticated) return(auth_wall_ui())
+    
+    # Role gate — officers see a polite message, not the data
+    if (rv$officer_role != "admin") {
+      return(tags$div(
+        style="display:flex;align-items:center;justify-content:center;min-height:300px;",
+        tags$div(
+          style="text-align:center;padding:40px;background:#fff;border-radius:12px;border:1px solid #dee2e6;max-width:420px;",
+          tags$div(style="font-size:48px;margin-bottom:12px;","🔒"),
+          tags$h4("Admin Access Required", style="font-weight:700;color:#1a1a2e;margin-bottom:8px;"),
+          tags$p(style="font-size:13px;color:#6c757d;margin:0;",
+                 "The Audit Log is restricted to administrators. Contact your NCIC admin if you need access.")
+        )
+      ))
+    }
+    
+    log  <- db_load_audit(500)
+    offs <- db_load_officers()
+    
+    tagList(
+      # ── Header bar ──────────────────────────────────────────────
+      tags$div(
+        style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px;",
+        tags$div(
+          tags$h4(style="font-weight:800;color:#1a1a2e;margin:0 0 2px;font-size:16px;",
+                  tagList(bs_icon("clock-history"), " Audit Log")),
+          tags$p(style="font-size:12px;color:#6c757d;margin:0;",
+                 "Tamper-evident record of all officer actions. Last 500 entries shown.")
+        ),
+        tags$div(style="display:flex;gap:8px;align-items:center;",
+                 tags$span(
+                   style="background:#dc3545;color:#fff;border-radius:4px;padding:3px 10px;font-size:11px;font-weight:600;",
+                   "ADMIN ONLY"),
+                 downloadButton("dl_audit",
+                                tagList(bs_icon("download"), " Export CSV"),
+                                style="background:#1a1a2e;color:#fff;border:none;border-radius:6px;font-weight:600;font-size:12px;padding:6px 14px;")
+        )
+      ),
+      
+      # ── KPI row ──────────────────────────────────────────────────
+      layout_columns(col_widths=c(3,3,3,3),
+                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-top:3px solid #0066cc;border-radius:8px;padding:12px 16px;text-align:center;",
+                              tags$div(style="font-size:22px;font-weight:800;color:#0066cc;", nrow(log)),
+                              tags$div(style="font-size:11px;color:#6c757d;text-transform:uppercase;letter-spacing:.05em;","Total Events")),
+                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-top:3px solid #198754;border-radius:8px;padding:12px 16px;text-align:center;",
+                              tags$div(style="font-size:22px;font-weight:800;color:#198754;",
+                                       sum(log$action == "LOGIN", na.rm=TRUE)),
+                              tags$div(style="font-size:11px;color:#6c757d;text-transform:uppercase;letter-spacing:.05em;","Logins")),
+                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-top:3px solid #fd7e14;border-radius:8px;padding:12px 16px;text-align:center;",
+                              tags$div(style="font-size:22px;font-weight:800;color:#fd7e14;",
+                                       sum(log$action %in% c("VALIDATE","ESCALATE","CLEAR"), na.rm=TRUE)),
+                              tags$div(style="font-size:11px;color:#6c757d;text-transform:uppercase;letter-spacing:.05em;","Validations")),
+                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-top:3px solid #dc3545;border-radius:8px;padding:12px 16px;text-align:center;",
+                              tags$div(style="font-size:22px;font-weight:800;color:#dc3545;",
+                                       sum(log$action %in% c("TIMEOUT","LOGIN_FAILED"), na.rm=TRUE)),
+                              tags$div(style="font-size:11px;color:#6c757d;text-transform:uppercase;letter-spacing:.05em;","Security Events"))
+      ),
+      
+      tags$div(style="margin-top:16px;",
+               layout_columns(col_widths=c(8,4),
+                              
+                              # ── Action log table ─────────────────────────────────────
+                              card(style="border-top:3px solid #1a1a2e;",
+                                   card_header(tagList(bs_icon("list-ul"), " Action Log")),
+                                   if (nrow(log) == 0) {
+                                     tags$p(style="font-size:12px;color:#6c757d;padding:12px;","No audit records yet.")
+                                   } else {
+                                     log_disp <- log
+                                     log_disp$action <- sapply(log_disp$action, function(a) {
+                                       col <- switch(a,
+                                                     LOGIN         = "#198754",
+                                                     LOGIN_FAILED  = "#dc3545",
+                                                     LOGOUT        = "#6c757d",
+                                                     TIMEOUT       = "#fd7e14",
+                                                     VALIDATE      = "#0066cc",
+                                                     ESCALATE      = "#dc3545",
+                                                     CLEAR         = "#198754",
+                                                     KEYWORD       = "#7c3aed",
+                                                     "#374151")
+                                       as.character(tags$span(
+                                         style=paste0("background:",col,"18;color:",col,
+                                                      ";border:1px solid ",col,"44;border-radius:3px;",
+                                                      "padding:1px 7px;font-size:10px;font-weight:700;"),
+                                         a))
+                                     })
+                                     log_disp$case_id <- ifelse(is.na(log_disp$case_id), "—", log_disp$case_id)
+                                     log_disp$detail  <- ifelse(is.na(log_disp$detail),  "—", log_disp$detail)
+                                     log_disp$id      <- NULL
+                                     names(log_disp)  <- c("Timestamp","Officer","Name","Action","Case ID","Detail")
+                                     DTOutput("audit_table")
+                                   }
+                              ),
+                              
+                              # ── Officer roster ──────────────────────────────────────
+                              card(style="border-top:3px solid #7c3aed;",
+                                   card_header(tagList(bs_icon("people"), " Officer Roster")),
+                                   if (nrow(offs) == 0) {
+                                     tags$p(style="font-size:12px;color:#6c757d;padding:12px;","No officers found.")
+                                   } else {
+                                     tags$div(style="display:flex;flex-direction:column;gap:6px;padding:4px 0;",
+                                              lapply(seq_len(nrow(offs)), function(i) {
+                                                o      <- offs[i,]
+                                                active <- o$active == 1
+                                                role   <- o$role
+                                                col    <- if (role == "admin") "#7c3aed" else "#0066cc"
+                                                tags$div(
+                                                  style=paste0("display:flex;align-items:center;justify-content:space-between;",
+                                                               "padding:8px 12px;border-radius:6px;",
+                                                               "background:", if(active) "#f8f9fa" else "#fff5f5", ";",
+                                                               "border:1px solid ", if(active) "#dee2e6" else "#fecaca", ";"),
+                                                  tags$div(
+                                                    tags$div(style="font-size:12px;font-weight:700;color:#1a1a2e;",
+                                                             o$username),
+                                                    tags$div(style="font-size:10px;color:#6c757d;margin-top:1px;",
+                                                             format(as.POSIXct(o$created_at), "%d %b %Y"))
+                                                  ),
+                                                  tags$div(style="display:flex;gap:5px;align-items:center;",
+                                                           tags$span(style=paste0("background:",col,"18;color:",col,
+                                                                                  ";border:1px solid ",col,"44;border-radius:3px;",
+                                                                                  "padding:1px 7px;font-size:10px;font-weight:700;"),
+                                                                     toupper(role)),
+                                                           tags$span(style=paste0("border-radius:3px;padding:1px 7px;",
+                                                                                  "font-size:10px;font-weight:700;",
+                                                                                  if(active) "background:#d1fae5;color:#065f46;"
+                                                                                  else       "background:#fee2e2;color:#991b1b;"),
+                                                                     if(active) "ACTIVE" else "INACTIVE")
+                                                  )
+                                                )
+                                              })
+                                     )
+                                   },
+                                   tags$div(style="padding:10px 4px 4px;font-size:11px;color:#9ca3af;border-top:1px solid #f0f0f0;margin-top:8px;",
+                                            tagList(bs_icon("info-circle"),
+                                                    " To add, remove, or reset officers: run ",
+                                                    tags$code("Rscript setup_officers.R"), " from the app directory."))
+                              )
+               )
+      )
+    )
+  })
+  
+  # ── Audit table render ─────────────────────────────────────────
+  output$audit_table <- renderDT({
+    log <- db_load_audit(500)
+    if (nrow(log) == 0) return(datatable(data.frame()))
+    
+    action_html <- sapply(log$action, function(a) {
+      col <- switch(a,
+                    LOGIN        = "#198754", LOGIN_FAILED = "#dc3545",
+                    LOGOUT       = "#6c757d", TIMEOUT      = "#fd7e14",
+                    VALIDATE     = "#0066cc", ESCALATE     = "#dc3545",
+                    CLEAR        = "#198754", KEYWORD      = "#7c3aed", "#374151")
+      sprintf('<span style="background:%s18;color:%s;border:1px solid %s44;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:700;">%s</span>',
+              col, col, col, a)
+    })
+    
+    disp <- data.frame(
+      Timestamp = log$ts,
+      Officer   = log$officer,
+      Name      = log$officer_name,
+      Action    = action_html,
+      `Case ID` = ifelse(is.na(log$case_id), "—", log$case_id),
+      Detail    = ifelse(is.na(log$detail),  "—", log$detail),
+      stringsAsFactors = FALSE, check.names = FALSE
+    )
+    
+    datatable(disp,
+              escape      = FALSE,
+              rownames    = FALSE,
+              options     = list(
+                pageLength  = 15,
+                order       = list(list(0, "desc")),
+                scrollX     = TRUE,
+                dom         = "frtip",
+                columnDefs  = list(list(width="140px", targets=0),
+                                   list(width="80px",  targets=1),
+                                   list(width="90px",  targets=3))
+              )
+    )
+  }, server=TRUE)
+  
+  # ── Audit CSV export ──────────────────────────────────────────
+  output$dl_audit <- downloadHandler(
+    filename = function() paste0("EWS_AuditLog_", Sys.Date(), ".csv"),
+    content  = function(file) {
+      log <- db_load_audit(10000)
+      write.csv(log, file, row.names=FALSE)
+    }
+  )
+  
+  # ── Wire audit() calls into existing validation observers ──────
+  # Patch: log every officer validation decision
+  session$onSessionEnded(function() {
+    un <- isolate(rv$officer_user)
+    nm <- isolate(rv$officer_name)
+    if (isolate(rv$authenticated)) {
+      audit(un, nm, "LOGOUT",
+            detail     = "Session ended",
+            session_id = isolate(rv$session_id))
     }
   })
   

@@ -11,3 +11,7 @@ cache/ncic_disagreements.rds
 *.Rproj
 .DS_Store
 Thumbs.db
+secrets/
+cache/
+*.sqlite
+.Renviron

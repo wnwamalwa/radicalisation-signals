@@ -1299,48 +1299,22 @@ ui <- page_navbar(
   # TAB 2: DASHBOARD
   nav_panel(title=tagList(bs_icon("speedometer2")," What are current signals?"),value="tab_dash",padding=16,
             
-            # ── Ethical warning banner ───────────────────────────────
+            # ── Slim reference bar ───────────────────────────────────
             tags$div(
-              style="background:#fff8e1;border:1px solid #ffc107;border-radius:8px;padding:9px 14px;margin-bottom:12px;display:flex;align-items:flex-start;gap:10px;",
-              tags$span(style="font-size:16px;flex-shrink:0;","⚠️"),
-              tags$div(style="font-size:12px;color:#664d03;line-height:1.5;",
-                       tags$strong("Interpret with caution. "),
-                       "These signals are AI-generated proxies for potential harmful narratives — they are ",
-                       tags$strong("not proof"), " of illegal activity. All L4/L5 cases require officer validation before any legal or operational action. Risk scores reflect relative patterns, not absolute severity."
-              )
-            ),
-            
-            # ── Intro + How to read (collapsible) ───────────────────
-            accordion(
-              id = "dash_intro_acc", open = FALSE,
-              accordion_panel(
-                title = tagList(bs_icon("question-circle"), " What does this dashboard show? How do I use it?"),
-                value = "dash_intro",
-                layout_columns(col_widths=c(7,5),
-                               tags$div(style="font-size:13px;line-height:1.8;color:#374151;",
-                                        tags$p(
-                                          tags$strong("Radicalisation Signals"), " monitors online content in Kenya for narratives ",
-                                          "associated with hate speech, ethnic incitement, and radicalisation. Posts are collected from ",
-                                          "social media platforms (Twitter/X, Facebook, TikTok, Telegram, WhatsApp), classified by ",
-                                          "GPT-4o-mini under the ", tags$strong("NCIC Cap 170 framework"), ", and validated by trained ",
-                                          "NCIC intelligence officers before any action is taken. The dataset covers ",
-                                          tags$strong("15 monitored counties"), " over a rolling ", tags$strong("30-day window."),
-                                          " Intended users: NCIC officers, researchers, CSOs, and policy analysts."
-                                        )
-                               ),
-                               tags$div(
-                                 tags$div(style="font-size:12px;font-weight:700;color:#1a1a2e;margin-bottom:8px;",
-                                          tagList(bs_icon("cursor"), " How to read this dashboard")),
-                                 tags$ol(style="font-size:12px;color:#374151;line-height:1.8;padding-left:16px;margin:0;",
-                                         tags$li("Use the ", tags$strong("date filter"), " (top right) to narrow the time window."),
-                                         tags$li("KPI cards show counts for the selected period — hover for definitions."),
-                                         tags$li("Click ", tags$strong("NCIC Distribution"), " to see the severity breakdown; ",
-                                                 tags$strong("Platform"), " to see which channels dominate."),
-                                         tags$li("Click ", tags$strong("Priority Cases"), " to review high-risk posts needing validation."),
-                                         tags$li("Typical questions: ", tags$em("Has L4+ activity increased this week? Which county has the highest avg risk? Which platform is most active?"))
-                                 )
-                               )
-                )
+              style="background:#fff8e1;border:1px solid #ffc107;border-radius:6px;padding:7px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;",
+              tags$div(style="display:flex;align-items:center;gap:8px;font-size:12px;color:#664d03;",
+                       tags$span("⚠️"),
+                       tags$span(tags$strong("AI signals — not proof of illegal activity."),
+                                 " L4/L5 require officer validation before action.")
+              ),
+              tags$div(style="display:flex;gap:10px;flex-shrink:0;",
+                       tags$a(tagList(bs_icon("book")," Interpretation Guide"),
+                              href="#", onclick="$('[data-value=\"tab_interpretation\"]').tab('show');return false;",
+                              style="font-size:11px;color:#0066cc;font-weight:600;text-decoration:none;white-space:nowrap;"),
+                       tags$span(style="color:#dee2e6;","│"),
+                       tags$a(tagList(bs_icon("diagram-3")," Methodology"),
+                              href="#", onclick="$('[data-value=\"tab_about\"]').tab('show');return false;",
+                              style="font-size:11px;color:#7c3aed;font-weight:600;text-decoration:none;white-space:nowrap;")
               )
             ),
             
@@ -1423,14 +1397,14 @@ ui <- page_navbar(
            
            # TAB 4: ML CLASSIFICATION
            nav_panel(title=tagList(bs_icon("cpu")," AI Classification"),value="tab_classify",padding=16,
-                     tags$div(style="background:#f8f9fa;border:1px solid #dee2e6;border-radius:8px;padding:10px 16px;margin-bottom:12px;display:flex;gap:12px;align-items:flex-start;",
-                              tags$span(style="font-size:16px;flex-shrink:0;","🤖"),
-                              tags$div(style="font-size:12px;color:#374151;line-height:1.6;",
-                                       tags$strong("GPT-4o-mini classification under NCIC Cap 170. "),
-                                       "Each post is classified through a three-stage chain: Violence Override → Target Test → Intent Test. ",
-                                       "Results are composite-scored using AI confidence, keyword weights, network exposure, and source history. ",
-                                       tags$span(style="color:#664d03;font-weight:600;","All L4/L5 outputs require officer validation in the Validation & Learning tab before any action.")
-                              )
+                     tags$div(style="background:#f8f9fa;border:1px solid #dee2e6;border-radius:6px;padding:7px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;",
+                              tags$div(style="display:flex;align-items:center;gap:8px;font-size:12px;color:#374151;",
+                                       tags$span("🤖"),
+                                       tags$span(tags$strong("GPT-4o-mini · NCIC Cap 170 · 3-stage chain"), " — Violence Override → Target Test → Intent Test.")
+                              ),
+                              tags$a(tagList(bs_icon("diagram-3")," Full classification methodology"),
+                                     href="#", onclick="$('[data-value=\"tab_about\"]').tab('show');return false;",
+                                     style="font-size:11px;color:#7c3aed;font-weight:600;text-decoration:none;white-space:nowrap;flex-shrink:0;")
                      ),
                      card(card_header(tagList(bs_icon("arrow-repeat")," Bulk Classification · GPT-4o-mini · NCIC Cap 170 · Async")),
                           tags$div(style="padding:8px 0;",
@@ -1491,14 +1465,15 @@ ui <- page_navbar(
            
            # TAB 6: NETWORK ANALYSIS
            nav_panel(title=tagList(bs_icon("diagram-3")," Who are the actors?"),value="tab_net",padding=16,
-                     tags$div(style="background:#fff8e1;border:1px solid #ffc107;border-left:4px solid #fd7e14;border-radius:8px;padding:10px 16px;margin-bottom:14px;display:flex;gap:12px;align-items:flex-start;",
-                              tags$span(style="font-size:16px;flex-shrink:0;","⚠️"),
-                              tags$div(style="font-size:12px;color:#664d03;line-height:1.6;",
-                                       tags$strong("Caution on handle attribution. "),
-                                       "Handles listed here are social media usernames from ingested content — they are proxies, not confirmed identities. ",
-                                       "Accounts may be automated bots, impersonators, or compromised accounts. ",
-                                       tags$strong("Do not act on handle data alone without independent identity verification.")
-                              )
+                     tags$div(style="background:#fff8e1;border:1px solid #ffc107;border-radius:6px;padding:7px 14px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;",
+                              tags$div(style="display:flex;align-items:center;gap:8px;font-size:12px;color:#664d03;",
+                                       tags$span("⚠️"),
+                                       tags$span(tags$strong("Handles are proxies, not confirmed identities."),
+                                                 " Do not act on handle data alone without independent verification.")
+                              ),
+                              tags$a(tagList(bs_icon("book")," See responsible use principles"),
+                                     href="#", onclick="$('[data-value=\"tab_interpretation\"]').tab('show');return false;",
+                                     style="font-size:11px;color:#0066cc;font-weight:600;text-decoration:none;white-space:nowrap;flex-shrink:0;")
                      ),
                      layout_columns(col_widths=c(6,6),
                                     card(card_header(tagList(bs_icon("person-fill-exclamation")," Flagged Handles · L3+ activity in past 30 days")),
@@ -1514,14 +1489,14 @@ ui <- page_navbar(
            
            # TAB 7: VALIDATION + LEARNING CENTRE (merged)
            nav_panel(title=tagList(bs_icon("lock")," Validation & Learning"),value="tab_val",padding=16,
-                     tags$div(style="background:#f0f9ff;border:1px solid #bae6fd;border-left:4px solid #0066cc;border-radius:8px;padding:10px 16px;margin-bottom:4px;display:flex;gap:12px;align-items:flex-start;",
-                              tags$span(style="font-size:16px;flex-shrink:0;","🧑‍⚖️"),
-                              tags$div(style="font-size:12px;color:#0c4a6e;line-height:1.6;",
-                                       tags$strong("Human-in-the-Loop (HITL) validation workflow. "),
-                                       "Officer Validation — review AI classifications, override NCIC levels, add notes, confirm, downgrade, escalate, or clear cases. ",
-                                       "Every decision updates keyword weights, grows the few-shot training bank, and re-scores all historical cases automatically. ",
-                                       tags$strong("Learning Centre — "), "inspect adapted keyword weights, add/remove keywords, review GPT vs officer disagreements."
-                              )
+                     tags$div(style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;padding:7px 14px;margin-bottom:4px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;",
+                              tags$div(style="display:flex;align-items:center;gap:8px;font-size:12px;color:#0c4a6e;",
+                                       tags$span("🧑‍⚖️"),
+                                       tags$span(tags$strong("HITL validation — "), "confirm, downgrade, escalate, or clear. Every decision updates keyword weights and re-scores all cases.")
+                              ),
+                              tags$a(tagList(bs_icon("book")," Validation workflow guide"),
+                                     href="#", onclick="$('[data-value=\"tab_interpretation\"]').tab('show');return false;",
+                                     style="font-size:11px;color:#0066cc;font-weight:600;text-decoration:none;white-space:nowrap;flex-shrink:0;")
                      ),
                      navset_pill(
                        id = "val_learn_pills",
@@ -1542,9 +1517,8 @@ ui <- page_navbar(
   nav_panel(title=tagList(bs_icon("graph-up-arrow")," Where is risk heading?"),value="tab_forecast",padding=16,
             uiOutput("forecast_ui")),
   
-  # TAB 10: DATA, METHODS & ETHICS
-  # TAB: DATA, METHODS & ETHICS
-  nav_panel(title=tagList(bs_icon("info-circle")," Methodology & Interpretation"),value="tab_about",padding=24,
+  # TAB 10: METHODOLOGY
+  nav_panel(title=tagList(bs_icon("diagram-3")," Methodology"),value="tab_about",padding=24,
             tags$div(style="max-width:980px;margin:0 auto;",
                      
                      # ── Header ─────────────────────────────────────────────────
@@ -1564,73 +1538,19 @@ ui <- page_navbar(
                               )
                      ),
                      
-                     # ── Critical notice ────────────────────────────────────────
+                     # ── Cross-reference bar ────────────────────────────────────
                      tags$div(
-                       style=paste0("background:linear-gradient(135deg,#fff8e1,#fff3cd);",
-                                    "border:1px solid #ffc107;border-left:4px solid #fd7e14;",
-                                    "border-radius:8px;padding:14px 18px;margin-bottom:24px;"),
-                       tags$div(style="display:flex;gap:12px;align-items:flex-start;",
-                                tags$span(style="font-size:20px;flex-shrink:0;","⚠️"),
-                                tags$div(style="font-size:13px;color:#664d03;line-height:1.7;",
-                                         tags$strong("AI classifications are analytical aids, not legal findings."),
-                                         " Signals generated by this platform represent statistical patterns in language — they indicate content ",
-                                         "that warrants human review, not evidence of criminal intent or activity. Every L4/L5 classification ",
-                                         "requires independent officer validation and legal review before any action is taken. ",
-                                         tags$strong("This platform must not be used as the sole basis for prosecution, surveillance, or enforcement.")
-                                )
-                       )
-                     ),
-                     
-                     # ── About + Coverage ──────────────────────────────────────
-                     layout_columns(col_widths=c(7,5),
-                                    card(style="border-top:3px solid #0066cc;height:100%;",
-                                         card_header(tagList(bs_icon("bullseye")," About This Platform")),
-                                         tags$div(style="font-size:13px;line-height:1.85;color:#374151;",
-                                                  tags$p(
-                                                    tags$strong("Radicalisation Signals"), " is an AI-assisted intelligence platform supporting the ",
-                                                    tags$a("National Cohesion and Integration Commission (NCIC)", href="https://www.cohesion.or.ke", target="_blank",
-                                                           style="color:#0066cc;text-decoration:none;font-weight:600;"),
-                                                    " of Kenya. It monitors social media for content associated with hate speech, ethnic incitement, ",
-                                                    "dehumanisation, and radicalisation — classified under the ", tags$strong("NCIC Cap 170 six-level taxonomy"),
-                                                    " using GPT-4o-mini and validated by trained NCIC intelligence officers."
-                                                  ),
-                                                  tags$p(
-                                                    "The platform covers all ", tags$strong("47 Kenya counties"), " using real IEBC administrative boundaries, ",
-                                                    "with signal intensity weighted by historical election-period tension, population density, and NCIC operational priorities. ",
-                                                    "The analysis window rolls over ", tags$strong("30 days"), ", with all historical scores automatically ",
-                                                    "updated whenever keyword weights are refined through officer feedback."
-                                                  ),
-                                                  tags$p(style="font-size:12px;color:#6c757d;font-style:italic;margin-top:4px;",
-                                                         "Intended users: NCIC intelligence officers, researchers, civil society organisations (CSOs), and policy analysts. ",
-                                                         "This is not a public-facing tool."
-                                                  )
-                                         )
-                                    ),
-                                    card(style="border-top:3px solid #198754;height:100%;",
-                                         card_header(tagList(bs_icon("database")," Data & Coverage")),
-                                         tags$table(style="width:100%;border-collapse:collapse;font-size:12px;",
-                                                    tags$tr(style="border-bottom:1px solid #f0f0f0;",
-                                                            tags$td(style="color:#6c757d;padding:7px 4px;","Counties"), tags$td(style="font-weight:600;padding:7px 4px;","47 of 47 (all Kenya)")),
-                                                    tags$tr(style="border-bottom:1px solid #f0f0f0;",
-                                                            tags$td(style="color:#6c757d;padding:7px 4px;","Platforms"),tags$td(style="font-weight:600;padding:7px 4px;","Twitter/X · Facebook · TikTok · Telegram · WhatsApp")),
-                                                    tags$tr(style="border-bottom:1px solid #f0f0f0;",
-                                                            tags$td(style="color:#6c757d;padding:7px 4px;","Languages"),tags$td(style="font-weight:600;padding:7px 4px;","Swahili · English · Sheng · Kikuyu · Luo · Kalenjin")),
-                                                    tags$tr(style="border-bottom:1px solid #f0f0f0;",
-                                                            tags$td(style="color:#6c757d;padding:7px 4px;","Analysis window"),tags$td(style="font-weight:600;padding:7px 4px;","30-day rolling (re-scored on weight changes)")),
-                                                    tags$tr(style="border-bottom:1px solid #f0f0f0;",
-                                                            tags$td(style="color:#6c757d;padding:7px 4px;","AI model"),tags$td(style="font-weight:600;padding:7px 4px;","GPT-4o-mini · temperature=0 · 3-attempt retry")),
-                                                    tags$tr(style="border-bottom:1px solid #f0f0f0;",
-                                                            tags$td(style="color:#6c757d;padding:7px 4px;","Legal framework"),tags$td(style="font-weight:600;padding:7px 4px;","NCIC Act Cap 170 · Section 13")),
-                                                    tags$tr(style="border-bottom:1px solid #f0f0f0;",
-                                                            tags$td(style="color:#6c757d;padding:7px 4px;","Persistence"),tags$td(style="font-weight:600;padding:7px 4px;","SQLite · cross-session sync (5s poll)")),
-                                                    tags$tr(
-                                                      tags$td(style="color:#6c757d;padding:7px 4px;","Unit tests"),tags$td(style="font-weight:600;padding:7px 4px;","24 testthat assertions · compute_risk · source_context"))
-                                         )
-                                    )
+                       style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;padding:8px 14px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;",
+                       tags$div(style="font-size:12px;color:#0c4a6e;",
+                                tagList(bs_icon("info-circle"), " This page covers the technical methodology — classification logic, risk scoring, safeguards, and limitations."),
+                       ),
+                       tags$a(tagList(bs_icon("book")," Interpretation & Usage Guide →"),
+                              href="#", onclick="$('[data-value=\"tab_interpretation\"]').tab('show');return false;",
+                              style="font-size:11px;color:#0066cc;font-weight:600;text-decoration:none;white-space:nowrap;flex-shrink:0;")
                      ),
                      
                      # ── NCIC Taxonomy ─────────────────────────────────────────
-                     tags$div(style="margin:24px 0 8px;",
+                     tags$div(style="margin:0 0 8px;",
                               tags$h5(style="font-weight:700;color:#1a1a2e;margin-bottom:4px;",
                                       tagList(bs_icon("layers"), " The NCIC 6-Level Classification Taxonomy")),
                               tags$p(style="font-size:12px;color:#6c757d;margin-bottom:14px;",
@@ -1806,6 +1726,263 @@ ui <- page_navbar(
                                 tags$span(style="background:#f0f4f8;color:#374151;border-radius:4px;padding:3px 8px;font-size:10px;font-weight:600;","SQLite Persistence"),
                                 tags$span(style="background:#f0f4f8;color:#374151;border-radius:4px;padding:3px 8px;font-size:10px;font-weight:600;","5s Cross-Session Sync")
                        )
+                     )
+            )
+  ),
+  
+  # TAB 11: INTERPRETATION
+  nav_panel(title=tagList(bs_icon("info-circle")," Interpretation"),value="tab_interpretation",padding=24,
+            tags$div(style="max-width:980px;margin:0 auto;",
+                     
+                     # ── Page header ────────────────────────────────────────────
+                     tags$div(style="margin-bottom:28px;padding-bottom:20px;border-bottom:2px solid #f0f4f8;",
+                              tags$h2(style="font-weight:800;color:#1a1a2e;margin:0 0 6px;font-size:22px;letter-spacing:-.01em;",
+                                      tagList(bs_icon("book"), " Interpretation & Usage Guide")),
+                              tags$p(style="color:#6c757d;font-size:13px;margin:0;",
+                                     "How to read this platform, what the outputs mean, and how to act on them responsibly.")
+                     ),
+                     
+                     # ── CRITICAL CAUTION BANNER ────────────────────────────────
+                     tags$div(
+                       style=paste0("background:linear-gradient(135deg,#fff8e1,#fff3cd);",
+                                    "border:2px solid #ffc107;border-left:6px solid #dc3545;",
+                                    "border-radius:10px;padding:20px 24px;margin-bottom:28px;"),
+                       tags$div(style="display:flex;gap:14px;align-items:flex-start;",
+                                tags$span(style="font-size:28px;flex-shrink:0;line-height:1;","⚠️"),
+                                tags$div(
+                                  tags$div(style="font-size:14px;font-weight:800;color:#7c2d12;margin-bottom:10px;text-transform:uppercase;letter-spacing:.04em;",
+                                           "Interpret with Caution — Critical Notices for All Users"),
+                                  tags$div(style="font-size:13px;color:#664d03;line-height:1.85;",
+                                           tags$p(style="margin:0 0 8px;",
+                                                  tags$strong("These signals are AI-generated proxies for potential harmful narratives — they are not proof of illegal activity."),
+                                                  " Classification outputs reflect statistical patterns in language as assessed by GPT-4o-mini under the NCIC Cap 170 framework. ",
+                                                  "A high NCIC level or risk score indicates content that warrants officer review — not that a crime has been committed."),
+                                           tags$p(style="margin:0 0 8px;",
+                                                  tags$strong("All L4/L5 cases require officer validation before any legal or operational action."),
+                                                  " No prosecution, takedown request, or enforcement measure should be initiated on the basis of AI classification alone. ",
+                                                  "Every high-severity case must be independently reviewed, confirmed, and documented by a trained NCIC intelligence officer."),
+                                           tags$p(style="margin:0;",
+                                                  tags$strong("Risk scores reflect relative patterns, not absolute severity."),
+                                                  " Scores are calibrated against this dataset and time window. A score of 80 means this post ranks high ",
+                                                  "relative to others in the current 30-day window — it is not a universal threat index and cannot be compared across platforms or time periods.")
+                                  )
+                                )
+                       )
+                     ),
+                     
+                     # ── What does this dashboard show? ─────────────────────────
+                     tags$div(style="margin-bottom:24px;",
+                              tags$h4(style="font-weight:700;color:#1a1a2e;margin-bottom:12px;font-size:16px;",
+                                      tagList(bs_icon("question-circle"), " What Does This Dashboard Show?")),
+                              layout_columns(col_widths=c(7,5),
+                                             tags$div(style="font-size:13px;line-height:1.85;color:#374151;",
+                                                      tags$p(
+                                                        tags$strong("Radicalisation Signals"), " monitors online content in Kenya for narratives ",
+                                                        "associated with hate speech, ethnic incitement, and radicalisation. Posts are collected from ",
+                                                        "social media platforms (Twitter/X, Facebook, TikTok, Telegram, WhatsApp), classified by ",
+                                                        tags$strong("GPT-4o-mini"), " under the ", tags$strong("NCIC Cap 170 framework"),
+                                                        ", and validated by trained NCIC intelligence officers before any action is taken."
+                                                      ),
+                                                      tags$p(
+                                                        "The dataset covers ", tags$strong("47 monitored counties"), " using real IEBC administrative boundaries, ",
+                                                        "over a rolling ", tags$strong("30-day window"),
+                                                        ". Signal intensity is weighted by historical election-period tension, population density, and NCIC operational priorities."
+                                                      ),
+                                                      tags$p(style="font-size:12px;color:#6c757d;font-style:italic;margin-top:4px;",
+                                                             "Intended users: NCIC intelligence officers, researchers, civil society organisations (CSOs), and policy analysts. ",
+                                                             "This is not a public-facing tool.")
+                                             ),
+                                             card(style="background:#f8f9fa;border:1px solid #dee2e6;",
+                                                  card_header(tagList(bs_icon("database")," Platform Snapshot")),
+                                                  tags$table(style="width:100%;border-collapse:collapse;font-size:12px;",
+                                                             tags$tr(style="border-bottom:1px solid #f0f0f0;",
+                                                                     tags$td(style="color:#6c757d;padding:7px 4px;","Counties"),
+                                                                     tags$td(style="font-weight:600;padding:7px 4px;","47 of 47 (all Kenya)")),
+                                                             tags$tr(style="border-bottom:1px solid #f0f0f0;",
+                                                                     tags$td(style="color:#6c757d;padding:7px 4px;","Platforms"),
+                                                                     tags$td(style="font-weight:600;padding:7px 4px;","Twitter/X · Facebook · TikTok · Telegram · WhatsApp")),
+                                                             tags$tr(style="border-bottom:1px solid #f0f0f0;",
+                                                                     tags$td(style="color:#6c757d;padding:7px 4px;","Languages"),
+                                                                     tags$td(style="font-weight:600;padding:7px 4px;","Swahili · English · Sheng · Kikuyu · Luo · Kalenjin")),
+                                                             tags$tr(style="border-bottom:1px solid #f0f0f0;",
+                                                                     tags$td(style="color:#6c757d;padding:7px 4px;","AI model"),
+                                                                     tags$td(style="font-weight:600;padding:7px 4px;","GPT-4o-mini · temperature=0")),
+                                                             tags$tr(style="border-bottom:1px solid #f0f0f0;",
+                                                                     tags$td(style="color:#6c757d;padding:7px 4px;","Legal framework"),
+                                                                     tags$td(style="font-weight:600;padding:7px 4px;","NCIC Act Cap 170 · Section 13")),
+                                                             tags$tr(
+                                                               tags$td(style="color:#6c757d;padding:7px 4px;","Analysis window"),
+                                                               tags$td(style="font-weight:600;padding:7px 4px;","30-day rolling"))
+                                                  )
+                                             )
+                              )
+                     ),
+                     
+                     tags$hr(style="border-color:#f0f4f8;margin:4px 0 24px;"),
+                     
+                     # ── How to read this dashboard ─────────────────────────────
+                     tags$div(style="margin-bottom:24px;",
+                              tags$h4(style="font-weight:700;color:#1a1a2e;margin-bottom:12px;font-size:16px;",
+                                      tagList(bs_icon("cursor"), " How to Read This Dashboard")),
+                              layout_columns(col_widths=c(6,6),
+                                             tags$div(
+                                               tags$div(style="font-size:12px;font-weight:700;color:#0066cc;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;",
+                                                        "Navigation & Filters"),
+                                               tags$ol(style="font-size:13px;color:#374151;line-height:1.9;padding-left:18px;margin:0;",
+                                                       tags$li("Use the ", tags$strong("date filter"), " (top right of any tab) to narrow the analysis time window."),
+                                                       tags$li(tags$strong("KPI cards"), " show signal counts for the selected period — hover over each for full definitions."),
+                                                       tags$li("Click ", tags$strong("NCIC Distribution"), " in the Analytics Charts card to see the severity breakdown across all six levels."),
+                                                       tags$li("Click ", tags$strong("Platform Breakdown"), " to see which channels (Twitter/X, WhatsApp, etc.) are most active."),
+                                                       tags$li("Switch to the ", tags$strong("Priority Cases"), " table to review high-risk posts that need officer validation."),
+                                                       tags$li("Use the ", tags$strong("Where are hotspots?"), " tab for geographic signal concentration by county.")
+                                               )
+                                             ),
+                                             tags$div(
+                                               tags$div(style="font-size:12px;font-weight:700;color:#0066cc;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;",
+                                                        "Typical Questions Officers Ask"),
+                                               tags$div(style="display:flex;flex-direction:column;gap:8px;",
+                                                        lapply(list(
+                                                          list(icon="exclamation-triangle", q="Has L4+ activity increased this week?", hint="Check the NCIC Distribution chart with a 7-day filter."),
+                                                          list(icon="geo-alt", q="Which county has the highest average risk?", hint="See the County Risk Map or the county table in reports."),
+                                                          list(icon="phone", q="Which platform is most active?", hint="Platform Breakdown chart on the Dashboard tab."),
+                                                          list(icon="person", q="Are any handles showing escalating patterns?", hint="Who are the actors? tab → Flagged Handles table."),
+                                                          list(icon="file-text", q="How many cases are ready for Section 13 action?", hint="Reports tab → NCIC Legal Report → Section 13 Cases sheet.")
+                                                        ), function(item)
+                                                          tags$div(style="background:#f8f9fa;border-radius:6px;padding:9px 12px;border-left:3px solid #0066cc;",
+                                                                   tags$div(style="font-size:12px;font-weight:600;color:#1a1a2e;margin-bottom:3px;",
+                                                                            tagList(bs_icon(item$icon), " ", item$q)),
+                                                                   tags$div(style="font-size:11px;color:#6c757d;", item$hint))
+                                                        )
+                                               )
+                                             )
+                              )
+                     ),
+                     
+                     tags$hr(style="border-color:#f0f4f8;margin:4px 0 24px;"),
+                     
+                     # ── Reading risk scores ────────────────────────────────────
+                     tags$div(style="margin-bottom:24px;",
+                              tags$h4(style="font-weight:700;color:#1a1a2e;margin-bottom:12px;font-size:16px;",
+                                      tagList(bs_icon("speedometer2"), " Reading Risk Scores and NCIC Levels")),
+                              layout_columns(col_widths=c(4,4,4),
+                                             card(style="border-top:3px solid #198754;",
+                                                  card_header(tagList(bs_icon("check-circle")," LOW Risk (0–34)")),
+                                                  tags$div(style="font-size:12px;color:#374151;line-height:1.75;padding:4px 0;",
+                                                           tags$p("Content classified at ", tags$strong("L0–L2"), ". Language may be offensive or reflect stereotyping but does not cross the Section 13 legal threshold."),
+                                                           tags$p(style="margin:0;color:#198754;font-weight:600;","Action: Log for trend analysis. Monitor if volume increases.")
+                                                  )
+                                             ),
+                                             card(style="border-top:3px solid #fd7e14;",
+                                                  card_header(tagList(bs_icon("dash-circle")," MEDIUM Risk (35–64)")),
+                                                  tags$div(style="font-size:12px;color:#374151;line-height:1.75;padding:4px 0;",
+                                                           tags$p("Content classified at ", tags$strong("L2–L3"), ". Prejudice, stereotyping, or dehumanisation language is present. Target group involvement detected."),
+                                                           tags$p(style="margin:0;color:#fd7e14;font-weight:600;","Action: Document patterns. Initiate monitoring flag. Request officer triage.")
+                                                  )
+                                             ),
+                                             card(style="border-top:3px solid #dc3545;",
+                                                  card_header(tagList(bs_icon("exclamation-triangle")," HIGH Risk (65–100)")),
+                                                  tags$div(style="font-size:12px;color:#374151;line-height:1.75;padding:4px 0;",
+                                                           tags$p("Content classified at ", tags$strong("L4–L5"), ". Section 13 threshold met or exceeded. Violence override or explicit incitement detected."),
+                                                           tags$p(style="margin:0;color:#dc3545;font-weight:600;","Action: Mandatory officer validation. If confirmed → Section 13 referral, DCI alert, takedown request.")
+                                                  )
+                                             )
+                              )
+                     ),
+                     
+                     tags$hr(style="border-color:#f0f4f8;margin:4px 0 24px;"),
+                     
+                     # ── Officer validation workflow ────────────────────────────
+                     tags$div(style="margin-bottom:24px;",
+                              tags$h4(style="font-weight:700;color:#1a1a2e;margin-bottom:12px;font-size:16px;",
+                                      tagList(bs_icon("shield-check"), " Officer Validation Workflow")),
+                              tags$p(style="font-size:13px;color:#374151;line-height:1.8;margin-bottom:16px;",
+                                     "The platform operates on a ", tags$strong("Human-in-the-Loop (HITL)"), " model. AI classification is the ", tags$em("first step"), ", not the final determination. ",
+                                     "Officers must complete the validation workflow for all L2+ cases before any action is logged or exported."),
+                              layout_columns(col_widths=c(3,3,3,3),
+                                             tags$div(style="text-align:center;padding:14px;background:#e8f0fe;border-radius:8px;",
+                                                      tags$div(style="font-size:28px;margin-bottom:8px;","🤖"),
+                                                      tags$div(style="font-size:12px;font-weight:700;color:#0066cc;margin-bottom:4px;","Step 1 — AI Classification"),
+                                                      tags$div(style="font-size:11px;color:#374151;line-height:1.6;","GPT-4o-mini classifies the post. Assigns NCIC level, confidence score, and signals.")),
+                                             tags$div(style="text-align:center;padding:14px;background:#fff8e1;border-radius:8px;",
+                                                      tags$div(style="font-size:28px;margin-bottom:8px;","🧑‍⚖️"),
+                                                      tags$div(style="font-size:12px;font-weight:700;color:#fd7e14;margin-bottom:4px;","Step 2 — Officer Review"),
+                                                      tags$div(style="font-size:11px;color:#374151;line-height:1.6;","Officer reads the post, checks context, and may override the NCIC level.")),
+                                             tags$div(style="text-align:center;padding:14px;background:#f0fff4;border-radius:8px;",
+                                                      tags$div(style="font-size:28px;margin-bottom:8px;","✅"),
+                                                      tags$div(style="font-size:12px;font-weight:700;color:#198754;margin-bottom:4px;","Step 3 — Decision"),
+                                                      tags$div(style="font-size:11px;color:#374151;line-height:1.6;","CONFIRM · ESCALATE · DOWNGRADE · CLEAR. Decision is logged with officer name and timestamp.")),
+                                             tags$div(style="text-align:center;padding:14px;background:#f8f0ff;border-radius:8px;",
+                                                      tags$div(style="font-size:28px;margin-bottom:8px;","📤"),
+                                                      tags$div(style="font-size:12px;font-weight:700;color:#7c3aed;margin-bottom:4px;","Step 4 — Action"),
+                                                      tags$div(style="font-size:11px;color:#374151;line-height:1.6;","Confirmed L4/L5 cases are exported to the Section 13 legal report and the DCI alert queue."))
+                              )
+                     ),
+                     
+                     tags$hr(style="border-color:#f0f4f8;margin:4px 0 24px;"),
+                     
+                     # ── Responsible use ────────────────────────────────────────
+                     tags$div(style="margin-bottom:24px;",
+                              tags$h4(style="font-weight:700;color:#1a1a2e;margin-bottom:12px;font-size:16px;",
+                                      tagList(bs_icon("hand-thumbs-up"), " Responsible Use Principles")),
+                              layout_columns(col_widths=c(6,6),
+                                             tags$div(style="display:flex;flex-direction:column;gap:10px;",
+                                                      tags$div(style="background:#f0fff4;border-left:4px solid #198754;border-radius:6px;padding:12px 14px;",
+                                                               tags$div(style="font-size:12px;font-weight:700;color:#198754;margin-bottom:4px;","✅ DO"),
+                                                               tags$ul(style="font-size:12px;color:#374151;line-height:1.8;margin:0;padding-left:16px;",
+                                                                       tags$li("Use signals as a ", tags$strong("triage aid"), " — to prioritise which content deserves closer human review."),
+                                                                       tags$li("Document all officer decisions with notes for accountability and audit trails."),
+                                                                       tags$li("Report language accuracy gaps (Sheng, code-switching) to the platform team for model improvement."),
+                                                                       tags$li("Apply the Activism Test: political accountability speech is constitutionally protected."),
+                                                                       tags$li("Cross-reference L4/L5 cases with independent sources before initiating any legal action.")
+                                                               )
+                                                      )
+                                             ),
+                                             tags$div(style="display:flex;flex-direction:column;gap:10px;",
+                                                      tags$div(style="background:#fff5f5;border-left:4px solid #dc3545;border-radius:6px;padding:12px 14px;",
+                                                               tags$div(style="font-size:12px;font-weight:700;color:#dc3545;margin-bottom:4px;","❌ DO NOT"),
+                                                               tags$ul(style="font-size:12px;color:#374151;line-height:1.8;margin:0;padding-left:16px;",
+                                                                       tags$li(tags$strong("Do not"), " use AI classification alone as grounds for arrest, prosecution, or surveillance."),
+                                                                       tags$li(tags$strong("Do not"), " treat handle attribution as confirmed identity — accounts may be bots or compromised."),
+                                                                       tags$li(tags$strong("Do not"), " compare risk scores across different time windows or external datasets."),
+                                                                       tags$li(tags$strong("Do not"), " share raw case data or unvalidated outputs outside NCIC-authorised personnel."),
+                                                                       tags$li(tags$strong("Do not"), " interpret a neutral (L0) classification as confirming a post is benign — model coverage has limits.")
+                                                               )
+                                                      )
+                                             )
+                              )
+                     ),
+                     
+                     tags$hr(style="border-color:#f0f4f8;margin:4px 0 24px;"),
+                     
+                     # ── Key terms glossary ─────────────────────────────────────
+                     tags$div(style="margin-bottom:24px;",
+                              tags$h4(style="font-weight:700;color:#1a1a2e;margin-bottom:12px;font-size:16px;",
+                                      tagList(bs_icon("journal-text"), " Key Terms & Definitions")),
+                              tags$div(style="display:grid;grid-template-columns:1fr 1fr;gap:8px;",
+                                       lapply(list(
+                                         list(term="NCIC Level", def="A 0–5 severity classification under Cap 170. L0 = Neutral; L5 = Toxic/Immediate action required."),
+                                         list(term="Risk Score", def="A composite 0–100 score blending AI confidence, keyword weight, network exposure, and source history."),
+                                         list(term="Section 13", def="The legal threshold in NCIC Act Cap 170 at which hate speech becomes a prosecutable offence. Triggered at L4+."),
+                                         list(term="Confidence", def="GPT-4o-mini's self-reported certainty (0–100%). Below 60% is flagged LOW and requires extra officer scrutiny."),
+                                         list(term="Source History", def="A handle's and county's pattern of prior posts over 30 days. Escalating actors receive a risk score boost (capped +30)."),
+                                         list(term="CIB", def="Coordinated Inauthentic Behaviour — multiple accounts posting near-identical content, suggesting an organised campaign."),
+                                         list(term="HITL", def="Human-in-the-Loop — the validation model ensuring every AI decision is reviewed by a trained officer before action."),
+                                         list(term="Violence Override", def="Stage 1 of the classification chain. Any post calling for physical harm is immediately escalated to L4/L5, bypassing other tests.")
+                                       ), function(item)
+                                         tags$div(style="background:#f8f9fa;border-radius:6px;padding:10px 14px;border-left:3px solid #0066cc;",
+                                                  tags$div(style="font-size:12px;font-weight:700;color:#1a1a2e;margin-bottom:3px;", item$term),
+                                                  tags$div(style="font-size:11px;color:#4b5563;line-height:1.65;", item$def))
+                                       )
+                              )
+                     ),
+                     
+                     # ── Footer ─────────────────────────────────────────────────
+                     tags$div(
+                       style="margin-top:32px;padding:20px 0;border-top:1px solid #dee2e6;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;",
+                       tags$div(style="font-size:11px;color:#9ca3af;",
+                                paste0(APP_NAME, " v5 · Interpretation Guide · NCIC Cap 170 · Kenya · March 2026")),
+                       tags$div(style="font-size:11px;color:#9ca3af;",
+                                "For queries or feedback: NCIC Intelligence Unit")
                      )
             )
   )

@@ -1105,6 +1105,7 @@ classify_tweet <- function(tweet, kw_weights=kw_weights_global,
     result$risk_formula         <- rs$formula
     result$source_history_score <- src_ctx$score
     result$source_context_note  <- src_ctx$summary
+    result$cache_hit            <- TRUE
     return(result)
   }
   
@@ -1329,18 +1330,32 @@ ews_theme <- bs_theme(
   .chat-user{background:#e8f0fe;border-left:3px solid #0066cc;margin-left:8px;}
   .chat-bot{background:#f8f9fa;border-left:3px solid #fd7e14;margin-right:8px;}
   .chat-thinking{color:#6c757d;font-style:italic;font-size:11px;}
-  .chat-thinking-spinner{display:flex;align-items:center;gap:8px;padding:2px 0;}
-  .chat-thinking-spinner .spin-ring{width:16px;height:16px;border:2px solid #dee2e6;border-top:2px solid #0066cc;border-radius:50%;animation:spin 0.8s linear infinite;flex-shrink:0;}
-  .chat-thinking-spinner .dot-pulse{display:flex;gap:3px;align-items:center;}
-  .chat-thinking-spinner .dot-pulse span{width:5px;height:5px;border-radius:50%;background:#0066cc;animation:dot-bounce 1.2s ease-in-out infinite;}
-  .chat-thinking-spinner .dot-pulse span:nth-child(2){animation-delay:0.2s;}
-  .chat-thinking-spinner .dot-pulse span:nth-child(3){animation-delay:0.4s;}
-  @keyframes dot-bounce{0%,80%,100%{transform:scale(0.6);opacity:0.4}40%{transform:scale(1);opacity:1}}
   .chat-input-row{display:flex;gap:6px;align-items:flex-end;}
   .chat-textarea{flex:1;background:#f8f9fa!important;border:1px solid #ced4da!important;border-radius:6px;color:#1a1a2e!important;font-size:12px!important;resize:none;padding:8px 10px;}
   .btn-classify{background:#0066cc;color:#fff;border:none;border-radius:6px;padding:8px 14px;font-size:16px;font-weight:700;cursor:pointer;transition:background 0.15s;}
-  .btn-classify:disabled{background:#6c9ed4;cursor:not-allowed;opacity:0.7;}
-  .btn-classify.loading{background:#004a99;font-size:12px;}
+  .btn-classify:disabled{background:#5a9fd4;cursor:not-allowed;}
+  /* ── Classifier spinner — pure JS, no Shiny round-trip ────────── */
+  #chat_spinner{
+    display:none;align-items:center;gap:10px;
+    background:#f0f9ff;border-left:3px solid #0066cc;border-radius:8px;
+    padding:10px 12px;margin-right:8px;margin-top:2px;
+  }
+  #chat_spinner.active{display:flex !important;}
+  #chat_spinner .cs-ring{
+    width:20px;height:20px;flex-shrink:0;
+    border:3px solid #bae6fd;border-top-color:#0066cc;
+    border-radius:50%;
+    animation:cs-spin 0.7s linear infinite;
+  }
+  #chat_spinner .cs-dots{display:flex;gap:4px;align-items:center;margin-top:3px;}
+  #chat_spinner .cs-dots span{
+    display:inline-block;width:6px;height:6px;border-radius:50%;background:#0066cc;
+    animation:cs-pop 1.1s ease-in-out infinite;
+  }
+  #chat_spinner .cs-dots span:nth-child(2){animation-delay:0.2s;}
+  #chat_spinner .cs-dots span:nth-child(3){animation-delay:0.4s;}
+  @keyframes cs-spin{to{transform:rotate(360deg)}}
+  @keyframes cs-pop{0%,80%,100%{transform:scale(0.5);opacity:0.3}40%{transform:scale(1.15);opacity:1}}
   .human-notice{background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:9px 12px;font-size:11px;color:#664d03;margin-top:8px;}
   .error-msg{background:#fff5f5;border:1px solid rgba(220,53,69,0.3);border-radius:6px;padding:8px 10px;color:#dc3545;font-size:11px;margin-top:6px;font-family:'IBM Plex Mono';}
   .auth-box{background:#fff;border:1px solid #dee2e6;border-radius:12px;padding:36px;width:380px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.1);}
@@ -1923,17 +1938,27 @@ ui <- page_navbar(
                                                      
                                                      accordion_panel(title=tagList(bs_icon("robot")," ML Classifier — DEMO"),value="acc_chat",
                                                                      uiOutput("chat_history"),
-                                                                     tags$div(class="chat-input-row",style="margin-top:4px;",
-                                                                              tags$textarea(id="chat_input",class="form-control chat-textarea",
-                                                                                            placeholder="Paste post here…",rows=3),
+                                                                     tags$div(id="chat_spinner",
+                                                                       tags$div(class="cs-ring"),
+                                                                       tags$div(
+                                                                         tags$div(style="font-size:11px;font-weight:700;color:#0066cc;margin-bottom:3px;",
+                                                                                  "Classifying…"),
+                                                                         tags$div(style="font-size:10px;color:#6c757d;margin-bottom:2px;",
+                                                                                  "GPT-4o-mini · NCIC Cap 170"),
+                                                                         tags$div(class="cs-dots",
+                                                                                  tags$span(), tags$span(), tags$span())
+                                                                       )
+                                                                     ),
+                                                                     tags$div(class="chat-input-row", style="margin-top:4px;",
+                                                                              tags$textarea(id="chat_input", class="form-control chat-textarea",
+                                                                                            placeholder="Paste post here…", rows=3),
                                                                               tags$button("→", id="chat_send", class="btn-classify",
-                                                                                          onclick="
-                                                                                            var btn = this;
-                                                                                            btn.disabled = true;
-                                                                                            btn.classList.add('loading');
-                                                                                            btn.innerHTML = '⏳';
-                                                                                            Shiny.setInputValue('chat_send', Math.random());
-                                                                                          ")),
+                                                                                onclick="
+                                                                                  var btn=this, sp=document.getElementById('chat_spinner');
+                                                                                  btn.disabled=true; btn.innerHTML='⏳';
+                                                                                  if(sp){ sp.classList.add('active'); sp.scrollIntoView({behavior:'smooth',block:'nearest'}); }
+                                                                                  Shiny.setInputValue('chat_send',Math.random());
+                                                                                ")),
                                                                      tags$div(style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;padding:6px 10px;font-size:11px;color:#0c4a6e;margin-top:5px;",
                                                                               tags$div(style="font-weight:700;margin-bottom:3px;",tagList(bs_icon("shield-fill-check")," Anti-Hallucination — 6 Layers Active")),
                                                                               tags$div(style="display:flex;flex-direction:column;gap:1px;",
@@ -1949,10 +1974,11 @@ ui <- page_navbar(
                                                                      ),
                                                                      tags$hr(style="border-color:#dee2e6;margin:6px 0;"),
                                                                      tags$div(style="display:flex;flex-direction:column;gap:3px;",
-                                                                              actionButton("ex1","L5 Toxic — explicit violence",   class="btn btn-sm btn-outline-danger w-100",  style="font-size:11px;text-align:left;"),
-                                                                              actionButton("ex2","L4 Hate speech — incitement",    class="btn btn-sm btn-outline-warning w-100", style="font-size:11px;text-align:left;"),
-                                                                              actionButton("ex3","L3 Dehumanization",              class="btn btn-sm btn-outline-secondary w-100",style="font-size:11px;text-align:left;"),
-                                                                              actionButton("ex4","L0 Neutral — safe content",      class="btn btn-sm btn-outline-success w-100", style="font-size:11px;text-align:left;")
+                                                                              actionButton("ex1","L5 Toxic — explicit violence",        class="btn btn-sm btn-outline-danger w-100",    style="font-size:11px;text-align:left;"),
+                                                                              actionButton("ex2","L4 Hate speech — incitement",          class="btn btn-sm btn-outline-warning w-100",   style="font-size:11px;text-align:left;"),
+                                                                              actionButton("ex3","L3 Dehumanization · 🌐 Swahili",       class="btn btn-sm btn-outline-secondary w-100", style="font-size:11px;text-align:left;"),
+                                                                              actionButton("ex5","L2 Prejudice · 🌐 Sheng",              class="btn btn-sm btn-outline-secondary w-100", style="font-size:11px;text-align:left;color:#7c3aed;border-color:#7c3aed;"),
+                                                                              actionButton("ex4","L0 Neutral — safe content",             class="btn btn-sm btn-outline-success w-100",   style="font-size:11px;text-align:left;")
                                                                      )
                                                      ),
                                                      
@@ -3779,7 +3805,9 @@ server <- function(input, output, session) {
   observeEvent(input$ex2, updateTextAreaInput(session,"chat_input",
                                               value="Watu wa kabila hiyo hawana haki ya kuishi hapa Kenya yetu"))
   observeEvent(input$ex3, updateTextAreaInput(session,"chat_input",
-                                              value="These migrants are vermin who should be exterminated from our land"))
+                                              value="Watu wa kabila hiyo ni kama magonjwa — wanaharibu nchi yetu, waende kwao maze!"))
+  observeEvent(input$ex5, updateTextAreaInput(session,"chat_input",
+                                              value="Maze hawa wasee wa kabila hiyo si fiti — si waaminifu na hawastahili nafasi kwa serikali yetu poa"))
   observeEvent(input$ex4, updateTextAreaInput(session,"chat_input",
                                               value="Let us unite as Kenyans and build this nation together with love"))
   
@@ -3798,20 +3826,7 @@ server <- function(input, output, session) {
                           m$text)
                else if (m$role=="thinking")
                  tags$div(class="chat-msg chat-bot",
-                   tags$div(class="chat-thinking-spinner",
-                     tags$div(class="spin-ring"),
-                     tags$div(style="display:flex;flex-direction:column;gap:2px;",
-                       tags$div(style="font-size:11px;font-weight:600;color:#0066cc;",
-                                "Classifying…"),
-                       tags$div(style="display:flex;align-items:center;gap:6px;",
-                         tags$div(style="font-size:10px;color:#6c757d;","GPT-4o-mini · NCIC Cap 170"),
-                         tags$div(class="dot-pulse",
-                           tags$span(), tags$span(), tags$span()
-                         )
-                       )
-                     )
-                   )
-                 )
+                          tags$span(class="chat-thinking","⏳ Classifying under NCIC framework…"))
                else if (m$role=="error")
                  tags$div(class="error-msg",tags$strong("API Error: "),m$text)
                else {
@@ -3819,8 +3834,11 @@ server <- function(input, output, session) {
                  nc   <- ncic_color(lvl)
                  rcol <- if(m$risk_score>=65)"#dc3545" else if(m$risk_score>=35)"#fd7e14" else "#198754"
                  tags$div(class="chat-msg chat-bot",
-                          tags$div(style="font-size:10px;color:#6c757d;font-family:'IBM Plex Mono';margin-bottom:3px;",
-                                   paste0("NCIC ENGINE · ",OPENAI_MODEL)),
+                          tags$div(style="font-size:10px;color:#6c757d;font-family:'IBM Plex Mono';margin-bottom:3px;display:flex;align-items:center;gap:6px;",
+                                   paste0("NCIC ENGINE · ",OPENAI_MODEL),
+                                   if(isTRUE(m$cache_hit))
+                                     tags$span(style="background:#d1fae5;color:#065f46;border-radius:3px;padding:0 5px;font-size:9px;font-weight:700;","⚡ cached")
+                                   else NULL),
                           tags$div(style="display:flex;align-items:center;gap:6px;margin-bottom:5px;flex-wrap:wrap;",
                                    HTML(ncic_badge_html(lvl)),
                                    # Language detection badge
@@ -3934,24 +3952,21 @@ server <- function(input, output, session) {
         lang_label=       lang_det$label,
         lang_is_sheng=    isTRUE(lang_det$is_sheng),
         lang_is_mixed=    isTRUE(lang_det$is_mixed),
-        lang_warning=     lang_det$warning %||% NA_character_
+        lang_warning=     lang_det$warning %||% NA_character_,
+        cache_hit=        isTRUE(res$cache_hit)
       )
     }
     rv$chat_history <- hist
     rv$cache_size   <- length(ls(classify_cache))
-    # Re-enable send button and restore arrow icon
     shinyjs::runjs("
-      var btn = document.getElementById('chat_send');
-      if (btn) {
-        btn.disabled = false;
-        btn.classList.remove('loading');
-        btn.innerHTML = '→';
-      }
-      // Auto-scroll chat to bottom
-      setTimeout(function() {
-        var c = document.getElementById('chat_scroll');
-        if (c) c.scrollTop = c.scrollHeight;
-      }, 50);
+      var btn=document.getElementById('chat_send');
+      var sp=document.getElementById('chat_spinner');
+      if(btn){btn.disabled=false;btn.innerHTML='→';}
+      if(sp){sp.classList.remove('active');}
+      setTimeout(function(){
+        var c=document.getElementById('chat_scroll');
+        if(c)c.scrollTop=c.scrollHeight;
+      },60);
     ")
   })
   

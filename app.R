@@ -978,14 +978,6 @@ build_cases <- function() {
     message(sprintf("[db] Seeded %d cases", nrow(all_cases)))
   } else {
     all_cases <- db_cases
-    # Backfill risk_level for any cases where it is missing or empty
-    # (happens when cases were saved before bulk classify ran)
-    missing_rl <- is.na(all_cases$risk_level) | nchar(trimws(all_cases$risk_level %||% "")) == 0
-    if (any(missing_rl)) {
-      all_cases$risk_level[missing_rl] <- with(all_cases[missing_rl, ],
-        ifelse(risk_score >= 65, "HIGH", ifelse(risk_score >= 35, "MEDIUM", "LOW")))
-      message(sprintf("[db] Backfilled risk_level for %d case(s)", sum(missing_rl)))
-    }
     message(sprintf("[db] Loaded %d cases from DB", nrow(all_cases)))
   }
 }
@@ -1337,9 +1329,18 @@ ews_theme <- bs_theme(
   .chat-user{background:#e8f0fe;border-left:3px solid #0066cc;margin-left:8px;}
   .chat-bot{background:#f8f9fa;border-left:3px solid #fd7e14;margin-right:8px;}
   .chat-thinking{color:#6c757d;font-style:italic;font-size:11px;}
+  .chat-thinking-spinner{display:flex;align-items:center;gap:8px;padding:2px 0;}
+  .chat-thinking-spinner .spin-ring{width:16px;height:16px;border:2px solid #dee2e6;border-top:2px solid #0066cc;border-radius:50%;animation:spin 0.8s linear infinite;flex-shrink:0;}
+  .chat-thinking-spinner .dot-pulse{display:flex;gap:3px;align-items:center;}
+  .chat-thinking-spinner .dot-pulse span{width:5px;height:5px;border-radius:50%;background:#0066cc;animation:dot-bounce 1.2s ease-in-out infinite;}
+  .chat-thinking-spinner .dot-pulse span:nth-child(2){animation-delay:0.2s;}
+  .chat-thinking-spinner .dot-pulse span:nth-child(3){animation-delay:0.4s;}
+  @keyframes dot-bounce{0%,80%,100%{transform:scale(0.6);opacity:0.4}40%{transform:scale(1);opacity:1}}
   .chat-input-row{display:flex;gap:6px;align-items:flex-end;}
   .chat-textarea{flex:1;background:#f8f9fa!important;border:1px solid #ced4da!important;border-radius:6px;color:#1a1a2e!important;font-size:12px!important;resize:none;padding:8px 10px;}
-  .btn-classify{background:#0066cc;color:#fff;border:none;border-radius:6px;padding:8px 14px;font-size:16px;font-weight:700;cursor:pointer;}
+  .btn-classify{background:#0066cc;color:#fff;border:none;border-radius:6px;padding:8px 14px;font-size:16px;font-weight:700;cursor:pointer;transition:background 0.15s;}
+  .btn-classify:disabled{background:#6c9ed4;cursor:not-allowed;opacity:0.7;}
+  .btn-classify.loading{background:#004a99;font-size:12px;}
   .human-notice{background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:9px 12px;font-size:11px;color:#664d03;margin-top:8px;}
   .error-msg{background:#fff5f5;border:1px solid rgba(220,53,69,0.3);border-radius:6px;padding:8px 10px;color:#dc3545;font-size:11px;margin-top:6px;font-family:'IBM Plex Mono';}
   .auth-box{background:#fff;border:1px solid #dee2e6;border-radius:12px;padding:36px;width:380px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.1);}
@@ -1910,15 +1911,7 @@ ui <- page_navbar(
       class="live-badge ms-2",
       style="font-size:10px;",
       tags$span(class="live-dot"), "LIVE"
-    ),
-    # Email config indicator — visible from every tab
-    if (all(nchar(Sys.getenv(c("GMAIL_USER","GMAIL_PASS","OFFICER_EMAIL"))) > 0))
-      tags$span(style="font-size:10px;color:rgba(255,255,255,0.6);margin-left:8px;",
-                "📧 alerts on")
-    else
-      tags$span(style="font-size:10px;color:#ffc107;font-weight:600;margin-left:8px;",
-                title="Set GMAIL_USER, GMAIL_PASS, OFFICER_EMAIL in secrets/.Renviron to enable email alerts",
-                "⚠ email off")
+    )
   ),
   theme=ews_theme, fillable=TRUE, id="main_nav",
   
@@ -1933,8 +1926,14 @@ ui <- page_navbar(
                                                                      tags$div(class="chat-input-row",style="margin-top:4px;",
                                                                               tags$textarea(id="chat_input",class="form-control chat-textarea",
                                                                                             placeholder="Paste post here…",rows=3),
-                                                                              tags$button("→",id="chat_send",class="btn-classify",
-                                                                                          onclick="Shiny.setInputValue('chat_send',Math.random())")),
+                                                                              tags$button("→", id="chat_send", class="btn-classify",
+                                                                                          onclick="
+                                                                                            var btn = this;
+                                                                                            btn.disabled = true;
+                                                                                            btn.classList.add('loading');
+                                                                                            btn.innerHTML = '⏳';
+                                                                                            Shiny.setInputValue('chat_send', Math.random());
+                                                                                          ")),
                                                                      tags$div(style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;padding:6px 10px;font-size:11px;color:#0c4a6e;margin-top:5px;",
                                                                               tags$div(style="font-weight:700;margin-bottom:3px;",tagList(bs_icon("shield-fill-check")," Anti-Hallucination — 6 Layers Active")),
                                                                               tags$div(style="display:flex;flex-direction:column;gap:1px;",
@@ -3799,7 +3798,20 @@ server <- function(input, output, session) {
                           m$text)
                else if (m$role=="thinking")
                  tags$div(class="chat-msg chat-bot",
-                          tags$span(class="chat-thinking","⏳ Classifying under NCIC framework…"))
+                   tags$div(class="chat-thinking-spinner",
+                     tags$div(class="spin-ring"),
+                     tags$div(style="display:flex;flex-direction:column;gap:2px;",
+                       tags$div(style="font-size:11px;font-weight:600;color:#0066cc;",
+                                "Classifying…"),
+                       tags$div(style="display:flex;align-items:center;gap:6px;",
+                         tags$div(style="font-size:10px;color:#6c757d;","GPT-4o-mini · NCIC Cap 170"),
+                         tags$div(class="dot-pulse",
+                           tags$span(), tags$span(), tags$span()
+                         )
+                       )
+                     )
+                   )
+                 )
                else if (m$role=="error")
                  tags$div(class="error-msg",tags$strong("API Error: "),m$text)
                else {
@@ -3927,6 +3939,20 @@ server <- function(input, output, session) {
     }
     rv$chat_history <- hist
     rv$cache_size   <- length(ls(classify_cache))
+    # Re-enable send button and restore arrow icon
+    shinyjs::runjs("
+      var btn = document.getElementById('chat_send');
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+        btn.innerHTML = '→';
+      }
+      // Auto-scroll chat to bottom
+      setTimeout(function() {
+        var c = document.getElementById('chat_scroll');
+        if (c) c.scrollTop = c.scrollHeight;
+      }, 50);
+    ")
   })
   
   # ── Cache controls ─────────────────────────────────────────
@@ -4782,44 +4808,21 @@ server <- function(input, output, session) {
   # ── Forecast ───────────────────────────────────────────────────
   output$forecast_ui <- renderUI({
     if (!rv$authenticated) return(auth_wall_ui(rv$timed_out))
-
+    
     now <- Sys.time()
-
+    
     # ── Build / use cached forecasts ──────────────────────────────
+    # Rebuild if cache is empty or older than 30 minutes
     needs_rebuild <- is.null(rv$forecast_cache) ||
       is.null(rv$forecast_built) ||
       as.numeric(difftime(now, rv$forecast_built, units="mins")) > 30
-
+    
     if (needs_rebuild) {
-      # Show a rich loading screen immediately while models fit
-      isolate({
-        shinyjs::runjs("document.getElementById('ews-loading-bar').classList.add('active');")
-        withProgress(message="Fitting Prophet models…", value=0, {
-          n_counties <- nrow(counties)
-          setProgress(0.05, detail=sprintf("Preparing %d county datasets…", n_counties))
-          rv$forecast_cache <- build_county_forecasts(rv$cases, now)
-          rv$forecast_built <- now
-          n_p <- sum(sapply(rv$forecast_cache, `[[`, "prophet_used"), na.rm=TRUE)
-          setProgress(1, detail=sprintf("%d Prophet · %d heuristic", n_p, n_counties - n_p))
-        })
-        shinyjs::runjs("document.getElementById('ews-loading-bar').classList.remove('active');")
+      withProgress(message="Fitting Prophet models…", value=0.1, {
+        rv$forecast_cache <- build_county_forecasts(rv$cases, now)
+        rv$forecast_built <- now
+        setProgress(1)
       })
-
-      # Return loading placeholder — Shiny will re-render once progress completes
-      return(
-        tags$div(style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:420px;gap:16px;",
-          tags$div(style="width:48px;height:48px;border:4px solid #dee2e6;border-top:4px solid #0066cc;border-radius:50%;animation:spin 1s linear infinite;"),
-          tags$div(style="text-align:center;",
-            tags$div(style="font-size:15px;font-weight:700;color:#1a1a2e;margin-bottom:6px;",
-                     "Fitting Prophet Models"),
-            tags$div(style="font-size:12px;color:#6c757d;",
-                     paste0("Running time-series analysis across all 47 counties…")),
-            tags$div(style="font-size:11px;color:#9ca3af;margin-top:4px;",
-                     "This takes 30–60 seconds on first load · cached for 30 minutes")
-          ),
-          tags$style("@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}")
-        )
-      )
     }
     
     fc_list    <- rv$forecast_cache

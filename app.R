@@ -25,7 +25,7 @@
 #     "leaflet.extras2","DT","dplyr","writexl","httr2","jsonlite",
 #     "shinyjs","digest","future","promises","plotly","later",
 #     "highcharter","sf","tmap","tools","DBI","RSQLite","bcrypt",
-#     "prophet","cld3"))
+#     "prophet"))
 #
 #  secrets/.Renviron:
 #   OPENAI_API_KEY=sk-proj-...
@@ -48,7 +48,6 @@ library(plotly);   library(later);    library(highcharter)
 library(sf);       library(tmap)
 library(DBI);      library(RSQLite);    library(bcrypt)
 library(prophet)
-library(cld3)      # language detection (install: install.packages("cld3"))
 
 plan(multisession)
 `%||%` <- function(a, b) if (!is.null(a)) a else b
@@ -1052,16 +1051,13 @@ classify_tweet <- function(tweet, kw_weights=kw_weights_global,
   
   if (exists(key, envir=classify_cache)) {
     result <- get(key, envir=classify_cache)
-    # Re-run risk formula with fresh source context even on cache hit
     ctx_sc <- length(result$contextual_factors %||% list()) * 8
-    # Apply language confidence penalty even on cache hit
-    adj_conf <- apply_lang_confidence_penalty(result$confidence %||% 50, lang_det)
-    rs <- compute_risk(tweet, adj_conf,
+    rs <- compute_risk(tweet, result$confidence %||% 50,
                        result$ncic_level %||% 0, kw_weights,
                        result$network_score %||% 20, 10, ctx_sc,
                        src_ctx$score)
-    result$risk_score         <- rs$score
-    result$risk_formula       <- rs$formula
+    result$risk_score           <- rs$score
+    result$risk_formula         <- rs$formula
     result$source_history_score <- src_ctx$score
     result$source_context_note  <- src_ctx$summary
     return(result)
@@ -1118,17 +1114,10 @@ classify_tweet <- function(tweet, kw_weights=kw_weights_global,
   result <- tryCatch(fromJSON(raw),
                      error=function(e) stop("JSON parse: ",e$message))
   
-  # Apply language confidence penalty before risk scoring
-  raw_conf   <- result$confidence %||% 50
-  adj_conf   <- apply_lang_confidence_penalty(raw_conf, lang_det)
-  result$confidence          <- adj_conf
-  result$confidence_raw      <- raw_conf
-  result$lang_penalty_applied<- raw_conf - adj_conf
-  
   # apply risk formula on main thread with source context
   ctx_sc <- length(result$contextual_factors %||% list()) * 8
   rs <- compute_risk(tweet,
-                     adj_conf,              # penalised confidence
+                     result$confidence    %||% 50,
                      result$ncic_level    %||% 0,
                      kw_weights,
                      result$network_score %||% 20,
@@ -1363,6 +1352,32 @@ ews_theme <- bs_theme(
   ::-webkit-scrollbar{width:5px;height:5px;}
   ::-webkit-scrollbar-track{background:#f0f4f8;}
   ::-webkit-scrollbar-thumb{background:#ced4da;border-radius:3px;}
+  /* ── Loading bar ─────────────────────────────────────────────── */
+  #ews-loading-bar{
+    position:fixed;top:0;left:0;right:0;z-index:99999;
+    height:3px;background:linear-gradient(90deg,#0066cc,#7c3aed,#0066cc);
+    background-size:200% 100%;
+    animation:loading-slide 1.2s linear infinite;
+    display:none;
+    box-shadow:0 1px 6px rgba(0,102,204,0.4);
+  }
+  #ews-loading-bar.active{display:block;}
+  @keyframes loading-slide{
+    0%{background-position:200% 0;}
+    100%{background-position:-200% 0;}
+  }
+  /* Dim outputs while recalculating */
+  .shiny-output-recalculating{
+    opacity:0.4!important;
+    transition:opacity 0.15s ease;
+  }
+  /* Loading label in card headers */
+  .ews-loading-label{
+    display:inline-flex;align-items:center;gap:5px;
+    font-size:10px;color:#0066cc;font-weight:600;
+    font-family:'IBM Plex Mono',monospace;
+    animation:pulse 1s infinite;
+  }
 ")
 
 # ── HTML HELPERS ─────────────────────────────────────────────────
@@ -1433,194 +1448,183 @@ apply_date_filter <- function(d, dr) {
   d[as.Date(d$timestamp)>=dr[1] & as.Date(d$timestamp)<=dr[2], ]
 }
 
-# ── LANGUAGE DETECTION LAYER ─────────────────────────────────────
-# Detects language using cld3 and maps to human-readable labels.
-# Also flags Sheng (Swahili-English code-switching) heuristically.
-# Used to warn officers when classification confidence may be reduced.
+# ── LANGUAGE DETECTION LAYER (GPT-4o-mini) ───────────────────────
+# Uses GPT-4o-mini for language detection — same model as classification,
+# better accuracy than cld3 on short posts, Sheng, and code-switching.
+# Returns language label + context hint injected into classification prompt.
+# No confidence penalties — GPT's own confidence is trusted directly.
 
 LANG_LABELS <- c(
-  sw = "Swahili", en = "English", ki = "Kikuyu",
-  luo= "Luo",     kln= "Kalenjin", so = "Somali",
-  ar = "Arabic",  fr = "French",   om = "Oromo"
+  sw="Swahili", en="English", ki="Kikuyu", luo="Luo",
+  kln="Kalenjin", so="Somali", ar="Arabic", sheng="Sheng",
+  mixed="Mixed language", other="Other"
 )
 
-# ── Sheng markers (Nairobi urban youth vernacular) ────────────────
-SHENG_MARKERS <- c(
-  "si","aki","niaje","sawa","maze","mbona","kwani","buda","dame",
-  "mresh","fiti","poa","msee","wadau","mtu wangu","kama kawaida",
-  "acha","izo","lakini","hii","hizo","dem","moto","bomba","chali",
-  "sanse","kudos","uko","kwako","manze","si ndio","si ndiyo",
-  "wueh","mdau","sema","mambo","vipi","freshi","mtu"
-)
-
-# ── Kikuyu hate-speech markers (transliteration hints for GPT) ────
+# ── Language-specific glossaries injected into GPT classification prompt ──
 KIKUYU_HATE_MARKERS <- c(
   "murogi"="witch/sorcerer (derogatory)",
-  "mwendwo"="beloved (can be ironic incitement)",
-  "thayu"="peace (context: used sarcastically in incitement)",
   "gĩthĩ"="rubbish/worthless person",
-  "ndũgũ"="brother (used in ethnic mobilisation)",
+  "ndũgũ"="brother (ethnic mobilisation framing)",
   "twĩrĩre"="we told you (us-vs-them framing)",
-  "maũndũ"="issues/problems (often precedes incitement)",
   "mũndũ"="person (combined with slurs = dehumanisation)"
 )
-
-# ── Kalenjin hate-speech markers ──────────────────────────────────
 KALENJIN_HATE_MARKERS <- c(
   "dorobo"="derogatory term for Ogiek/forest dwellers",
   "ng'etuny"="enemy/stranger (ethnic boundary marker)",
   "korosek"="chase away/expel (expulsion rhetoric)",
   "boisiek"="outsiders (exclusion framing)",
-  "kipkorir"="warrior (mobilisation context)",
-  "mambo"="things/issues (often precedes incitement in mixed speech)"
+  "kipkorir"="warrior (mobilisation context)"
 )
-
-# ── Luo hate-speech markers ───────────────────────────────────────
 LUO_HATE_MARKERS <- c(
   "jajuok"="witch/evil person (derogatory)",
-  "jaluo"="Luo person (neutral but weaponised in incitement)",
-  "odhiambo"="common name used in ethnic slurs",
   "wuod"="son of (used in ethnic targeting)",
-  "chuth"="completely/totally (intensifier in threats)",
-  "mondo"="let it be (precedes commands including threats)",
-  "dhi"="go (used in expulsion rhetoric: dhi dala = go home)"
+  "dhi"="go — expulsion rhetoric (dhi dala = go home)",
+  "mondo"="let it be (precedes commands including threats)"
+)
+SHENG_MARKERS <- c(
+  "niaje","maze","buda","msee","wadau","mresh","fiti","poa",
+  "sanse","manze","wueh","mdau","freshi","chali","dem","bomba"
 )
 
-# ── Build language context hint for GPT prompt ───────────────────
+# ── GPT language detection ────────────────────────────────────────
+detect_language <- function(text) {
+  api_key <- Sys.getenv("OPENAI_API_KEY")
+  
+  # Fast heuristic pre-check for Sheng before calling API
+  text_l  <- tolower(text)
+  n_sheng <- sum(sapply(SHENG_MARKERS, function(m) grepl(m, text_l, fixed=TRUE)))
+  
+  result <- tryCatch({
+    resp <- request("https://api.openai.com/v1/chat/completions") |>
+      req_headers("Content-Type"="application/json",
+                  "Authorization"=paste("Bearer", api_key)) |>
+      req_body_json(list(
+        model       = OPENAI_MODEL,
+        max_tokens  = 60L,
+        temperature = 0,
+        messages    = list(
+          list(role="system", content=paste0(
+            "You are a language identifier for Kenyan social media. ",
+            "Respond with ONLY a JSON object: ",
+            "{\"code\":\"<sw|en|ki|luo|kln|so|ar|sheng|mixed|other>\",",
+            "\"label\":\"<full name>\",",
+            "\"is_sheng\":<true|false>,",
+            "\"is_mixed\":<true|false>} ",
+            "Codes: sw=Swahili, en=English, ki=Kikuyu, luo=Luo, kln=Kalenjin, ",
+            "so=Somali, ar=Arabic, sheng=Sheng/code-switching, mixed=multiple languages, other=other. ",
+            "If Swahili-English code-switching with urban slang, use sheng."
+          )),
+          list(role="user", content=paste0('Identify the language of: "', 
+                                           substr(gsub('"',"'",text), 1, 200), '"'))
+        )
+      )) |>
+      req_error(is_error=\(r) FALSE) |>
+      req_perform() |>
+      resp_body_json()
+    
+    raw  <- gsub("```json|```|\\n","", trimws(resp$choices[[1]]$message$content))
+    parsed <- tryCatch(jsonlite::fromJSON(raw), error=function(e) NULL)
+    
+    if (!is.null(parsed)) {
+      list(
+        code     = parsed$code     %||% "other",
+        label    = parsed$label    %||% "Other",
+        is_sheng = isTRUE(parsed$is_sheng) || n_sheng >= 2,
+        is_mixed = isTRUE(parsed$is_mixed)
+      )
+    } else {
+      list(code="other", label="Other", is_sheng=(n_sheng>=2), is_mixed=FALSE)
+    }
+  }, error = function(e) {
+    # Fallback if API call fails — use Sheng heuristic only
+    list(code="other", label="Other", is_sheng=(n_sheng>=2), is_mixed=FALSE)
+  })
+  
+  code  <- result$code
+  label <- result$label
+  
+  # Build warning message for UI display (informational only — no penalties)
+  warning_msg <- if (isTRUE(result$is_sheng) || code == "sheng")
+    "🌐 Sheng/code-switching detected — language-specific context injected into classification prompt."
+  else if (isTRUE(result$is_mixed) || code == "mixed")
+    "🌐 Mixed-language content detected — context injected into classification prompt."
+  else if (code == "ki")
+    "🌐 Kikuyu detected — Kikuyu glossary injected into classification prompt."
+  else if (code == "kln")
+    "🌐 Kalenjin detected — PEV-era rhetorical pattern hints injected into classification prompt."
+  else if (code == "luo")
+    "🌐 Luo detected — Luo glossary injected into classification prompt."
+  else
+    NA_character_
+  
+  list(
+    code     = code,
+    label    = label,
+    is_sheng = isTRUE(result$is_sheng) || code == "sheng",
+    is_mixed = isTRUE(result$is_mixed) || code == "mixed",
+    warning  = warning_msg
+  )
+}
+
+# ── Build language context hint for GPT classification prompt ─────
 build_language_hint <- function(lang_det, text) {
   code <- lang_det$code
   hint_parts <- c()
+  text_l <- tolower(text)
   
-  # Sheng/code-switching: provide glossary of detected markers
-  if (isTRUE(lang_det$is_sheng)) {
-    text_l <- tolower(text)
+  if (isTRUE(lang_det$is_sheng) || code == "sheng") {
     detected <- SHENG_MARKERS[sapply(SHENG_MARKERS, function(m)
       grepl(m, text_l, fixed=TRUE))]
     hint_parts <- c(hint_parts, paste0(
-      "LANGUAGE NOTE: This post contains Sheng (Nairobi urban code-switching). ",
-      "Detected markers: [", paste(head(detected, 6), collapse=", "), "]. ",
-      "Sheng is often used to evade keyword detection. Interpret slang literally ",
-      "and consider the underlying Swahili/English meaning when assessing intent."))
+      "LANGUAGE CONTEXT: This post is in Sheng (Nairobi urban code-switching). ",
+      if (length(detected) > 0)
+        paste0("Detected markers: [", paste(head(detected,5), collapse=", "), "]. ")
+      else "",
+      "Sheng is used to evade keyword detection — interpret slang by its underlying ",
+      "Swahili/English meaning when assessing intent."))
   }
   
-  # Kikuyu
   if (code == "ki") {
-    text_l <- tolower(text)
     matched <- names(KIKUYU_HATE_MARKERS)[sapply(names(KIKUYU_HATE_MARKERS),
                                                  function(m) grepl(m, text_l, fixed=TRUE))]
-    gloss <- if (length(matched) > 0)
-      paste0(" Detected terms with translations: ",
-             paste(sapply(matched, function(m)
-               paste0("'", m, "' = ", KIKUYU_HATE_MARKERS[m])), collapse="; "), ".")
-    else ""
+    gloss <- if (length(matched)>0)
+      paste0(" Terms detected: ", paste(sapply(matched, function(m)
+        paste0("'",m,"'=",KIKUYU_HATE_MARKERS[m])), collapse="; "), ".") else ""
     hint_parts <- c(hint_parts, paste0(
-      "LANGUAGE NOTE: This post is in Kikuyu (Central Kenya). ",
-      "GPT-4o-mini has reduced accuracy for Kikuyu — apply extra caution. ",
-      "Focus on structural signals (us-vs-them framing, calls to action, ",
-      "dehumanising comparisons) rather than keyword matching.", gloss))
+      "LANGUAGE CONTEXT: Kikuyu (Central Kenya). Focus on structural signals — ",
+      "us-vs-them framing, exclusion commands, dehumanising comparisons — ",
+      "rather than keyword matching alone.", gloss))
   }
   
-  # Kalenjin
   if (code == "kln") {
-    text_l <- tolower(text)
     matched <- names(KALENJIN_HATE_MARKERS)[sapply(names(KALENJIN_HATE_MARKERS),
                                                    function(m) grepl(m, text_l, fixed=TRUE))]
-    gloss <- if (length(matched) > 0)
-      paste0(" Detected terms with translations: ",
-             paste(sapply(matched, function(m)
-               paste0("'", m, "' = ", KALENJIN_HATE_MARKERS[m])), collapse="; "), ".")
-    else ""
+    gloss <- if (length(matched)>0)
+      paste0(" Terms detected: ", paste(sapply(matched, function(m)
+        paste0("'",m,"'=",KALENJIN_HATE_MARKERS[m])), collapse="; "), ".") else ""
     hint_parts <- c(hint_parts, paste0(
-      "LANGUAGE NOTE: This post is in Kalenjin (Rift Valley). ",
-      "Kalenjin has PEV-era (2007/08) rhetorical patterns associated with ethnic mobilisation. ",
-      "Be alert to expulsion rhetoric, warrior-framing, and boundary-marking between communities.", gloss))
+      "LANGUAGE CONTEXT: Kalenjin (Rift Valley). Alert to PEV-era (2007/08) ",
+      "rhetorical patterns — expulsion rhetoric, warrior-framing, ",
+      "boundary-marking between communities.", gloss))
   }
   
-  # Luo
   if (code == "luo") {
-    text_l <- tolower(text)
     matched <- names(LUO_HATE_MARKERS)[sapply(names(LUO_HATE_MARKERS),
                                               function(m) grepl(m, text_l, fixed=TRUE))]
-    gloss <- if (length(matched) > 0)
-      paste0(" Detected terms with translations: ",
-             paste(sapply(matched, function(m)
-               paste0("'", m, "' = ", LUO_HATE_MARKERS[m])), collapse="; "), ".")
-    else ""
+    gloss <- if (length(matched)>0)
+      paste0(" Terms detected: ", paste(sapply(matched, function(m)
+        paste0("'",m,"'=",LUO_HATE_MARKERS[m])), collapse="; "), ".") else ""
     hint_parts <- c(hint_parts, paste0(
-      "LANGUAGE NOTE: This post is in Luo (Nyanza region). ",
-      "Focus on targeting of ethnic groups, expulsion commands (e.g. 'dhi dalo'), ",
-      "and dehumanising comparisons.", gloss))
+      "LANGUAGE CONTEXT: Luo (Nyanza region). Focus on ethnic targeting, ",
+      "expulsion commands (dhi dala = go home), dehumanising comparisons.", gloss))
   }
   
-  # Unknown / undetected
-  if (code == "unknown" && !isTRUE(lang_det$is_sheng)) {
+  if (isTRUE(lang_det$is_mixed) || code == "mixed")
     hint_parts <- c(hint_parts,
-                    "LANGUAGE NOTE: Language could not be detected. Apply conservative classification — ",
-                    "when in doubt between two levels, assign the higher. Flag for manual officer review.")
-  }
+                    "LANGUAGE CONTEXT: Mixed-language post. Assess each language segment independently.")
   
   if (length(hint_parts) == 0) return("")
   paste0("\n\n", paste(hint_parts, collapse="\n"), "\n")
-}
-
-# ── Language-aware confidence penalty ────────────────────────────
-# Reduces GPT confidence score for low-coverage languages so risk
-# scores honestly reflect model uncertainty.
-apply_lang_confidence_penalty <- function(confidence, lang_det) {
-  penalty <- if      (isTRUE(lang_det$is_sheng))          10L
-  else if (lang_det$code == "ki")               15L
-  else if (lang_det$code == "kln")              15L
-  else if (lang_det$code == "luo")              10L
-  else if (lang_det$code == "unknown")          12L
-  else if (isTRUE(lang_det$low_coverage))        8L
-  else                                           0L
-  max(0L, as.integer(confidence) - penalty)
-}
-
-detect_language <- function(text) {
-  result <- tryCatch({
-    det <- cld3::detect_language(text)
-    code <- if (is.na(det)) "unknown" else det
-    list(code=code, confidence=NA_real_)
-  }, error = function(e) list(code="unknown", confidence=NA_real_))
-  
-  code  <- result$code
-  label <- LANG_LABELS[code] %||% paste0("Other (", code, ")")
-  
-  text_l   <- tolower(text)
-  n_sheng  <- sum(sapply(SHENG_MARKERS, function(m) grepl(m, text_l, fixed=TRUE)))
-  is_sheng <- n_sheng >= 2 && code %in% c("sw","en","unknown")
-  
-  has_latin  <- grepl("[a-zA-Z]", text)
-  has_arabic <- grepl("[\u0600-\u06FF]", text)
-  is_mixed   <- has_latin && has_arabic
-  
-  low_coverage <- code %in% c("ki","kln","luo","so","om","unknown")
-  
-  warning_msg <- if (is_sheng)
-    "⚠ Sheng/code-switching detected — confidence score penalised. Officer review recommended."
-  else if (is_mixed)
-    "⚠ Mixed-script content detected — verify classification manually."
-  else if (code == "ki")
-    "⚠ Kikuyu detected — confidence penalised –15 pts. Language-specific glossary injected into GPT prompt."
-  else if (code == "kln")
-    "⚠ Kalenjin detected — confidence penalised –15 pts. PEV-era rhetorical pattern hints injected."
-  else if (code == "luo")
-    "⚠ Luo detected — confidence penalised –10 pts. Language-specific glossary injected into GPT prompt."
-  else if (low_coverage && code != "unknown")
-    paste0("⚠ Low-coverage language (", label, ") — confidence penalised. GPT accuracy is reduced.")
-  else if (code == "unknown")
-    "⚠ Language undetected — confidence penalised. Manual review recommended."
-  else NA_character_
-  
-  list(
-    code        = code,
-    label       = label,
-    is_sheng    = is_sheng,
-    is_mixed    = is_mixed,
-    low_coverage= low_coverage,
-    warning     = warning_msg
-  )
 }
 
 # ── PROPHET FORECAST ENGINE ──────────────────────────────────────
@@ -1780,6 +1784,7 @@ build_county_forecasts <- function(cases_df, now = Sys.time()) {
 }
 ui <- page_navbar(
   header = tags$head(
+    shinyjs::useShinyjs(),
     tags$script(HTML(sprintf('
       // ── Inactivity tracker ─────────────────────────────────────
       (function() {
@@ -1799,7 +1804,29 @@ ui <- page_navbar(
             Shiny.setInputValue("activity_ping", Date.now(), {priority: "event"});
         }, 3000);
       })();
-    ')))
+    '))),
+    # Loading bar div — controlled by shinyjs
+    tags$div(id="ews-loading-bar"),
+    tags$script(HTML('
+      // ── Global loading bar ──────────────────────────────────────
+      // Shows animated bar at top of page whenever Shiny is recalculating.
+      // Hides automatically when all outputs are idle.
+      $(document).on("shiny:busy", function() {
+        document.getElementById("ews-loading-bar").classList.add("active");
+      });
+      $(document).on("shiny:idle", function() {
+        document.getElementById("ews-loading-bar").classList.remove("active");
+      });
+      // Also show on any output recalculation start, hide on value
+      $(document).on("shiny:recalculating", function() {
+        document.getElementById("ews-loading-bar").classList.add("active");
+      });
+      $(document).on("shiny:value shiny:error", function() {
+        if (!$(".shiny-output-recalculating").length) {
+          document.getElementById("ews-loading-bar").classList.remove("active");
+        }
+      });
+    '))
   ),
   title = tags$span(
     style="display:inline-flex;align-items:center;gap:10px;",
@@ -1833,26 +1860,26 @@ ui <- page_navbar(
                                            accordion(id="acc_map",open=c("acc_chat","acc_filt"),
                                                      
                                                      accordion_panel(title=tagList(bs_icon("robot")," ML Classifier — DEMO"),value="acc_chat",
-                                                                     tags$p(style="font-size:11px;color:#6c757d;margin-bottom:6px;",
-                                                                            "Paste any post — classified under NCIC Cap 170 framework."),
                                                                      uiOutput("chat_history"),
-                                                                     tags$div(class="chat-input-row",
+                                                                     tags$div(class="chat-input-row",style="margin-top:4px;",
                                                                               tags$textarea(id="chat_input",class="form-control chat-textarea",
                                                                                             placeholder="Paste post here…",rows=3),
                                                                               tags$button("→",id="chat_send",class="btn-classify",
                                                                                           onclick="Shiny.setInputValue('chat_send',Math.random())")),
-                                                                     tags$div(style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;padding:8px 10px;font-size:11px;color:#0c4a6e;margin-top:6px;",
-                                                                              tags$div(style="font-weight:700;margin-bottom:4px;",tagList(bs_icon("shield-fill-check")," Anti-Hallucination — 6 Layers Active")),
-                                                                              tags$div(style="display:flex;flex-direction:column;gap:2px;",
+                                                                     tags$div(style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;padding:6px 10px;font-size:11px;color:#0c4a6e;margin-top:5px;",
+                                                                              tags$div(style="font-weight:700;margin-bottom:3px;",tagList(bs_icon("shield-fill-check")," Anti-Hallucination — 6 Layers Active")),
+                                                                              tags$div(style="display:flex;flex-direction:column;gap:1px;",
                                                                                        tags$span("① temperature=0 — deterministic output"),
                                                                                        tags$span("② JSON schema — no free-text invention"),
                                                                                        tags$span("③ Cap 170 decision chain — legally grounded"),
                                                                                        tags$span("④ Confidence score — uncertainty flagged"),
                                                                                        tags$span("⑤ Officer validation — human has final word"),
                                                                                        tags$span("⑥ Disagreement log — model learns from corrections")
-                                                                              )
+                                                                              ),
+                                                                              tags$div(style="margin-top:4px;padding-top:4px;border-top:1px solid #bae6fd;color:#0066cc;font-weight:600;",
+                                                                                       "🌐 Language-aware: GPT detects language · glossaries injected for Kikuyu, Kalenjin, Luo, Sheng")
                                                                      ),
-                                                                     tags$hr(style="border-color:#dee2e6;margin:8px 0;"),
+                                                                     tags$hr(style="border-color:#dee2e6;margin:6px 0;"),
                                                                      tags$div(style="display:flex;flex-direction:column;gap:3px;",
                                                                               actionButton("ex1","L5 Toxic — explicit violence",   class="btn btn-sm btn-outline-danger w-100",  style="font-size:11px;text-align:left;"),
                                                                               actionButton("ex2","L4 Hate speech — incitement",    class="btn btn-sm btn-outline-warning w-100", style="font-size:11px;text-align:left;"),
@@ -2404,7 +2431,9 @@ ui <- page_navbar(
                                  layout_columns(col_widths=c(6,6),
                                                 tags$div(style="font-size:12px;line-height:1.8;color:#374151;",
                                                          tags$p(tags$strong("Language coverage: "),
-                                                                "Classification accuracy is highest for Swahili and English. Mixed-language posts (Sheng, code-switching) may be under- or mis-classified. Kalenjin and Kikuyu content has the least training signal. Language detection now flags these automatically."),
+                                                                "GPT-4o-mini detects the language of each post before classification — replacing the weaker cld3 statistical library. ",
+                                                                "Kikuyu, Kalenjin, Luo, and Sheng posts receive language-specific glossaries of known hate-speech terms with English translations injected directly into the classification prompt. ",
+                                                                "A 🌐 language badge is displayed on every classifier result, and a blue informational banner confirms which language context was applied."),
                                                          tags$p(tags$strong("Identity verification: "),
                                                                 "The model cannot verify the real-world identity, bot status, or geographic location of posters. Handles are proxies, not confirmed actors."),
                                                          tags$p(tags$strong("Demonstration data: "),
@@ -2552,6 +2581,9 @@ ui <- page_navbar(
                                                                      tags$td(style="color:#6c757d;padding:7px 4px;","Languages"),
                                                                      tags$td(style="font-weight:600;padding:7px 4px;","Swahili · English · Sheng · Kikuyu · Luo · Kalenjin")),
                                                              tags$tr(style="border-bottom:1px solid #f0f0f0;",
+                                                                     tags$td(style="color:#6c757d;padding:7px 4px;","Lang detection"),
+                                                                     tags$td(style="font-weight:600;padding:7px 4px;","GPT-4o-mini · glossary injection per language")),
+                                                             tags$tr(style="border-bottom:1px solid #f0f0f0;",
                                                                      tags$td(style="color:#6c757d;padding:7px 4px;","AI model"),
                                                                      tags$td(style="font-weight:600;padding:7px 4px;","GPT-4o-mini · temperature=0")),
                                                              tags$tr(style="border-bottom:1px solid #f0f0f0;",
@@ -2678,7 +2710,7 @@ ui <- page_navbar(
                                                                tags$ul(style="font-size:12px;color:#374151;line-height:1.8;margin:0;padding-left:16px;",
                                                                        tags$li("Use signals as a ", tags$strong("triage aid"), " — to prioritise which content deserves closer human review."),
                                                                        tags$li("Document all officer decisions with notes for accountability and audit trails."),
-                                                                       tags$li("Report language accuracy gaps (Sheng, code-switching) to the platform team for model improvement."),
+                                                                       tags$li("Note the 🌐 language badge — Kikuyu, Kalenjin, Luo, and Sheng posts have language-specific glossaries injected into the classification prompt."),
                                                                        tags$li("Apply the Activism Test: political accountability speech is constitutionally protected."),
                                                                        tags$li("Cross-reference L4/L5 cases with independent sources before initiating any legal action.")
                                                                )
@@ -2715,8 +2747,9 @@ ui <- page_navbar(
                                          list(term="CIB", def="Coordinated Inauthentic Behaviour — multiple accounts posting near-identical content, suggesting an organised campaign."),
                                          list(term="HITL", def="Human-in-the-Loop — the validation model ensuring every AI decision is reviewed by a trained officer before action."),
                                          list(term="Violence Override", def="Stage 1 of the classification chain. Any post calling for physical harm is immediately escalated to L4/L5, bypassing other tests."),
-                                         list(term="Hallucination", def="When an AI model generates confident but factually incorrect or invented outputs. Prevented here by 6 layers: temperature=0, JSON schema, Cap 170 chain, confidence scoring, HITL, and disagreement retraining."),
-                                         list(term="temperature=0", def="A GPT parameter that makes output fully deterministic — the same post always returns the same classification. Eliminates random variation and drift."),
+                                         list(term="Language Detection", def="GPT-4o-mini detects the language of each post before classification. Kikuyu, Kalenjin, Luo, and Sheng posts receive language-specific glossaries and structural guidance injected into the prompt. A 🌐 badge confirms which context was applied."),
+                                         list(term="Hallucination", def="When an AI generates confident but factually incorrect outputs. Prevented by 6 layers: temperature=0, JSON schema, Cap 170 chain, confidence scoring, HITL, and disagreement retraining."),
+                                         list(term="temperature=0", def="A GPT parameter making output fully deterministic — the same post always returns the same classification, eliminating random variation and drift."),
                                          list(term="Disagreement Log", def="When an officer overrides the AI's NCIC level, the difference is logged and used to retrain keyword weights and update the few-shot training bank in real time.")
                                        ), function(item)
                                          tags$div(style="background:#f8f9fa;border-radius:6px;padding:10px 14px;border-left:3px solid #0066cc;",
@@ -3540,7 +3573,7 @@ server <- function(input, output, session) {
       return(tags$div(class="chat-container",
                       tags$div(class="chat-msg chat-bot",
                                tags$span(class="chat-thinking",
-                                         "👋 Paste any post — classified under NCIC Cap 170 framework with risk formula."))))
+                                         "👋 Paste any post — and wait for classification scores."))))
     tags$div(class="chat-container",id="chat_scroll",
              lapply(msgs,function(m){
                if (m$role=="user")
@@ -3577,16 +3610,12 @@ server <- function(input, output, session) {
                                      tags$span(style="background:#e9ecef;color:#374151;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:600;",
                                                paste0("Target: ", gsub("_"," ", m$target_type))) else NULL
                           ),
-                          # Language warning banner
+                          # Language context banner (informational — no penalty)
                           if (!is.null(m$lang_warning) && !is.na(m$lang_warning))
-                            tags$div(style="background:#fff8e1;border-left:3px solid #ffc107;border-radius:4px;padding:5px 9px;font-size:11px;margin-bottom:5px;color:#664d03;",
+                            tags$div(style="background:#f0f9ff;border-left:3px solid #0066cc;border-radius:4px;padding:5px 9px;font-size:11px;margin-bottom:5px;color:#0c4a6e;",
                                      m$lang_warning) else NULL,
                           tags$div(style="font-size:11px;",
                                    tags$strong("Confidence: "),paste0(m$conf,"% "),HTML(conf_band_html(conf_band(m$conf))),
-                                   if (!is.null(m$lang_penalty) && !is.na(m$lang_penalty) && m$lang_penalty > 0)
-                                     tags$span(style="color:#dc3545;font-size:10px;margin-left:4px;",
-                                               paste0("(–",m$lang_penalty," lang penalty)"))
-                                   else NULL,
                                    "  |  ",tags$strong("Category: "),m$category,"  |  ",
                                    tags$strong("Risk: "),tags$span(style=paste0("color:",rcol,";font-weight:700;"),m$risk_score)),
                           if (!is.null(m$formula)&&nchar(m$formula)>0)
@@ -3628,6 +3657,7 @@ server <- function(input, output, session) {
   observeEvent(input$chat_send, {
     req(input$chat_input, nchar(trimws(input$chat_input))>0)
     tw <- trimws(input$chat_input)
+    shinyjs::runjs("document.getElementById('ews-loading-bar').classList.add('active');")
     
     # ── Detect language before classification ──────────────────
     lang_det <- tryCatch(detect_language(tw), error=function(e)
@@ -3643,6 +3673,7 @@ server <- function(input, output, session) {
                                    handle="@chat_input", county="Unknown",
                                    cases_df=rv$cases, lang_det=lang_det),
                     error=function(e) list(role="error",text=conditionMessage(e)))
+    shinyjs::runjs("document.getElementById('ews-loading-bar').classList.remove('active');")
     hist <- rv$chat_history
     if (!is.null(res$role)&&res$role=="error") {
       hist[[length(hist)]] <- res
@@ -3674,8 +3705,7 @@ server <- function(input, output, session) {
         lang_label=       lang_det$label,
         lang_is_sheng=    isTRUE(lang_det$is_sheng),
         lang_is_mixed=    isTRUE(lang_det$is_mixed),
-        lang_warning=     lang_det$warning %||% NA_character_,
-        lang_penalty=     res$lang_penalty_applied %||% 0L
+        lang_warning=     lang_det$warning %||% NA_character_
       )
     }
     rv$chat_history <- hist
@@ -3772,6 +3802,7 @@ server <- function(input, output, session) {
   # ── Bulk classification with retry queue ─────────────────────────
   observeEvent(input$btn_bulk, {
     req(!rv$bulk_running)
+    shinyjs::runjs("document.getElementById('ews-loading-bar').classList.add('active');")
     rv$bulk_running <- TRUE
     rv$bulk_done    <- 0
     rv$bulk_total   <- nrow(rv$cases)
@@ -3842,6 +3873,7 @@ server <- function(input, output, session) {
         rv$bulk_running <- FALSE
         rv$cache_size   <- length(ls(classify_cache))
         save_cache()
+        shinyjs::runjs("document.getElementById('ews-loading-bar').classList.remove('active');")
         n_fail <- length(rv$bulk_errors)
         if (n_fail == 0) {
           showNotification(
@@ -4776,8 +4808,12 @@ server <- function(input, output, session) {
   
   # ── Rebuild forecast button ────────────────────────────────────
   observeEvent(input$btn_rebuild_forecast, {
+    shinyjs::runjs("document.getElementById('ews-loading-bar').classList.add('active');")
     rv$forecast_cache <- NULL
     rv$forecast_built <- NULL
+    later::later(function() {
+      shinyjs::runjs("document.getElementById('ews-loading-bar').classList.remove('active');")
+    }, delay = 0.5)
   })
   
   # ── Prophet trend chart output ─────────────────────────────────

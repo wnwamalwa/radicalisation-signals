@@ -1,41 +1,48 @@
 # ================================================================
-#  EARLY WARNING SIGNALS  —  v4
+#  RADICALISATION SIGNALS  —  v5
 #  Kenya National Cohesion Intelligence Platform
-#  R Shiny + bslib | NCIC Framework | HITL Learning | Async GPT
+#  R Shiny + bslib | NCIC Cap 170 | GPT-4o-mini | HITL | Prophet
 # ================================================================
-#  NEW IN v4:
-#   1.  App renamed: Early Warning Signals
-#   2.  6-level NCIC taxonomy replacing binary labels:
-#       0=Neutral · 1=Offensive · 2=Prejudice · 3=Dehumanization
-#       4=Hate Speech · 5=Toxic
-#   3.  Full NCIC legal framework (Cap 170, Section 13) in GPT prompt
-#   4.  Officer identity tracked (login name stored, shown in all records)
-#   5.  Validation drives RL: keyword weights adapt per confirmation,
-#       few-shot example bank grows, confidence calibration runs
-#   6.  Observer registry prevents duplicate observer accumulation
-#   7.  Async cache: all cache writes on main thread (no race condition)
-#   8.  Officer note persisted across pagination pages
-#   9.  NCIC level override by officer, disagreements logged
-#  10.  Officer performance dashboard (validations, accuracy, speed)
-#  11.  NCIC report export (Section 13 cases, escalation queue)
-#  12.  Plotly everywhere, shared reactive data, date filters global
-#
-#  Install (run once):
-#   install.packages(c("shiny","bslib","bsicons","leaflet",
-#     "leaflet.extras2","DT","dplyr","writexl","httr2","jsonlite",
-#     "shinyjs","digest","future","promises","plotly","later",
-#     "highcharter","sf","tmap","tools","DBI","RSQLite","bcrypt",
-#     "prophet"))
+#  v5 FEATURES:
+#   1.  GPT-4o-mini language detection (replaces cld3)
+#          — Sheng, Kikuyu, Kalenjin, Luo glossaries injected into prompt
+#   2.  Prophet time-series forecast per county (14-day, 80% CI)
+#   3.  bcrypt-hashed credentials + role-based access (admin/officer)
+#   4.  Session timeout (20 min) + supervisor email notification
+#   5.  Tamper-evident audit log + CSV export
+#   6.  Section 13 escalation queue (Pending→Filed→DCI→Resolved)
+#   7.  Password complexity enforcement (10+ chars, upper/lower/digit/special)
+#   8.  SQLite WAL mode (concurrent reads)
+#   9.  Global loading bar (shinyjs) on all renders
+#  10.  Auto-installs missing packages on startup
+#  11.  Auto-seeds admin account + backfills S13 queue on first run
 #
 #  secrets/.Renviron:
 #   OPENAI_API_KEY=sk-proj-...
 #   GMAIL_USER=you@gmail.com
 #   GMAIL_PASS=xxxx xxxx xxxx xxxx
-#   OFFICER_EMAIL=officer@ncic.go.ke
-#   ADMIN_USERNAME=admin          # username for the first admin account
-#   ADMIN_PASSWORD=<strong-pass>  # 10+ chars, upper+lower+digit+special, hashed on first run
-#   (never commit .Renviron to git — add it to .gitignore)
+#   OFFICER_EMAIL=officer@ncic.go.ke          # case alert destination
+#   SUPERVISOR_EMAIL=supervisor@ncic.go.ke    # session timeout alerts
+#   ADMIN_USERNAME=admin
+#   ADMIN_PASSWORD=<strong-pass>  # 10+ chars, upper+lower+digit+special
+#   (never commit .Renviron to git — add to .gitignore)
 # ================================================================
+
+# ── Auto-install any missing packages ────────────────────────────
+.required_pkgs <- c(
+  "shiny","bslib","bsicons","leaflet","leaflet.extras2",
+  "DT","dplyr","writexl","httr2","jsonlite","shinyjs",
+  "digest","future","promises","plotly","later","highcharter",
+  "sf","tmap","tools","DBI","RSQLite","bcrypt","prophet"
+)
+.missing <- .required_pkgs[!sapply(.required_pkgs, requireNamespace, quietly=TRUE)]
+if (length(.missing) > 0) {
+  message(sprintf("[startup] Installing %d missing package(s): %s",
+                  length(.missing), paste(.missing, collapse=", ")))
+  install.packages(.missing, repos="https://cloud.r-project.org", quiet=TRUE)
+  message("[startup] Package installation complete.")
+}
+rm(.required_pkgs, .missing)
 
 readRenviron("secrets/.Renviron")
 
@@ -44,7 +51,7 @@ library(leaflet);  library(leaflet.extras2)
 library(DT);       library(dplyr);      library(writexl)
 library(httr2);    library(jsonlite);   library(shinyjs)
 library(digest);   library(future);     library(promises)
-library(plotly);   library(later);    library(highcharter)
+library(plotly);   library(later);      library(highcharter)
 library(sf);       library(tmap)
 library(DBI);      library(RSQLite);    library(bcrypt)
 library(prophet)
@@ -233,8 +240,7 @@ check_pw_strength <- function(password, username) {
     errs <- c(errs, "At least one special character required (e.g. ! @ # $)")
   if (tolower(password) == tolower(username))
     errs <- c(errs, "Password must not match the username")
-  if (grepl("password|ncic|admin|officer|intel|kenya|2024|2025|2026",
-            tolower(password)))
+  if (grepl("password|ncic|admin|officer|intel|kenya", tolower(password)))
     errs <- c(errs, "Password contains a common word — choose something unique")
   errs
 }
@@ -339,6 +345,45 @@ db_s13_load <- function() {
 
 db_init()
 db_seed_admin()
+
+# ── S13 queue backfill ───────────────────────────────────────────
+# On startup, any validated L4/L5 case not already in s13_queue
+# is automatically enqueued so the queue is never empty after deploy.
+db_s13_backfill <- function() {
+  tryCatch({
+    con <- db_connect(); on.exit(dbDisconnect(con))
+    # Get all validated high-severity cases not yet in queue
+    existing <- dbGetQuery(con, "SELECT case_id FROM s13_queue")$case_id
+    cases    <- dbGetQuery(con,
+      "SELECT * FROM cases WHERE ncic_level >= 4 AND validated_by IS NOT NULL")
+    if (nrow(cases) == 0) return(invisible(NULL))
+    new_cases <- cases[!cases$case_id %in% existing, ]
+    if (nrow(new_cases) == 0) return(invisible(NULL))
+    for (i in seq_len(nrow(new_cases))) {
+      row <- new_cases[i, ]
+      dbExecute(con,
+        paste0("INSERT OR IGNORE INTO s13_queue ",
+               "(case_id,county,platform,tweet_text,ncic_level,risk_score,",
+               "target_group,validated_by,validated_at,status,created_at,updated_at) ",
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"),
+        list(row$case_id,
+             row$county    %||% "Unknown",
+             row$platform  %||% "Unknown",
+             substr(row$tweet_text %||% "", 1, 500),
+             as.integer(row$ncic_level),
+             as.integer(row$risk_score %||% 0L),
+             row$target_group %||% "",
+             row$validated_by %||% "system",
+             row$validated_at %||% format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+             "PENDING",
+             format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+             format(Sys.time(), "%Y-%m-%d %H:%M:%S")))
+    }
+    n <- nrow(new_cases)
+    if (n > 0) message(sprintf("[startup] S13 backfill: %d case(s) added to queue", n))
+  }, error = function(e) message("[startup] S13 backfill error: ", e$message))
+}
+db_s13_backfill()
 
 # ── Cases ────────────────────────────────────────────────────────
 db_load_cases <- function() {
@@ -1224,7 +1269,7 @@ send_alert_email <- function(officer, case_id, ncic_level, ncic_lbl,
     ncic_rec, sig_html, note_html,
     "<div style='margin-top:18px;padding-top:12px;border-top:1px solid #dee2e6;",
     "font-size:10px;color:#868e96;'>Generated ",
-    format(Sys.time(),"%Y-%m-%d %H:%M:%S")," EAT — ",APP_NAME," v4</div>",
+    format(Sys.time(),"%Y-%m-%d %H:%M:%S")," EAT — ",APP_NAME," v5</div>",
     "</div></body></html>"
   )
   
@@ -1415,14 +1460,22 @@ officer_tag_html <- function(name) {
   as.character(tags$span(class="officer-tag","👤 ",name))
 }
 
-auth_wall_ui <- function() {
+auth_wall_ui <- function(timed_out = FALSE) {
   tagList(useShinyjs(),
           tags$div(style="display:flex;align-items:center;justify-content:center;min-height:440px;",
                    tags$div(class="auth-box",
                             tags$div(style="font-size:48px;margin-bottom:10px;","🇰🇪"),
                             tags$h3(APP_NAME,style="font-size:18px;"),
-                            tags$p("Authorised NCIC personnel only. Enter your credentials.",
-                                   style="color:#6c757d;font-size:12px;margin-bottom:18px;"),
+                            if (isTRUE(timed_out))
+                              tags$div(
+                                style="background:#fff8e1;border:1px solid #ffc107;border-left:3px solid #fd7e14;border-radius:6px;padding:8px 12px;margin-bottom:14px;font-size:12px;color:#664d03;",
+                                tagList(bs_icon("clock"), tags$strong(" Session timed out"),
+                                        " — your session was automatically locked after ",
+                                        SESSION_TIMEOUT, " minutes of inactivity. Please sign in again.")
+                              )
+                            else
+                              tags$p("Authorised NCIC personnel only. Enter your credentials.",
+                                     style="color:#6c757d;font-size:12px;margin-bottom:18px;"),
                             textInput("auth_name", NULL, placeholder="Full name (e.g. Officer Mwangi)", width="100%"),
                             textInput("auth_username", NULL, placeholder="Username", width="100%"),
                             passwordInput("auth_password", NULL, placeholder="Password", width="100%"),
@@ -2906,6 +2959,7 @@ server <- function(input, output, session) {
     officer_name   = "",
     officer_role   = "officer",
     officer_user   = "",
+    timed_out      = FALSE,
     session_id     = digest::digest(paste0(Sys.time(), runif(1)), algo="md5"),
     last_activity  = Sys.time(),
     timeout_warned = FALSE,
@@ -2950,14 +3004,18 @@ server <- function(input, output, session) {
             session_id = isolate(rv$session_id))
       rv$authenticated  <- FALSE
       rv$timeout_warned <- FALSE
+      rv$timed_out      <- TRUE
       shinyjs::runjs("Shiny.setInputValue('session_locked', true, {priority: 'event'});")
       
       # ── Notify supervisor via email ──────────────────────────────
       tryCatch({
         gu <- Sys.getenv("GMAIL_USER")
         gp <- Sys.getenv("GMAIL_PASS")
+        # Use dedicated SUPERVISOR_EMAIL if set, fallback to OFFICER_EMAIL
+        se <- Sys.getenv("SUPERVISOR_EMAIL")
         oe <- Sys.getenv("OFFICER_EMAIL")
-        if (all(nchar(c(gu,gp,oe)) > 0)) {
+        notify_addr <- if (nchar(se) > 0) se else oe
+        if (all(nchar(c(gu, gp, notify_addr)) > 0)) {
           subj <- sprintf("[EWS Security] Session timeout — %s auto-locked at %s",
                           nm, format(Sys.time(), "%H:%M %Z"))
           body <- paste0(
@@ -2988,14 +3046,14 @@ server <- function(input, output, session) {
             APP_NAME, " v5 · NCIC Cap 170 · Audit log reference: TIMEOUT</div>",
             "</div></body></html>"
           )
-          mime <- paste0("From: ",gu,"\r\nTo: ",oe,
+          mime <- paste0("From: ",gu,"\r\nTo: ",notify_addr,
                          "\r\nSubject: ",subj,
                          "\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n",body)
           tmp <- tempfile(fileext=".txt")
           writeLines(mime, tmp, useBytes=FALSE)
           on.exit(unlink(tmp), add=TRUE)
           cmd_email <- paste0("curl --url 'smtps://smtp.gmail.com:465' --ssl-reqd ",
-                              "--mail-from '",gu,"' --mail-rcpt '",oe,"' ",
+                              "--mail-from '",gu,"' --mail-rcpt '",notify_addr,"' ",
                               "--user '",gu,":",gp,"' --upload-file '",tmp,"' --silent")
           system(cmd_email, intern=FALSE, wait=FALSE)   # non-blocking
         }
@@ -3028,44 +3086,59 @@ server <- function(input, output, session) {
   # Poll DB every 5 seconds. If another officer validated a case, the DB
   # row will differ from rv$cases. Merge only changed rows to avoid
   # overwriting in-progress bulk operations on this session.
-  db_poll_timer <- reactiveTimer(5000)
-  
+  db_poll_timer <- reactiveTimer(15000)  # poll every 15s (was 5s)
+
   observe({
     db_poll_timer()
     if (rv$bulk_running) return()   # don't sync mid-bulk
-    
+
     tryCatch({
       fresh <- db_load_cases()
       if (is.null(fresh) || nrow(fresh) == 0) return()
-      
+
       cur <- isolate(rv$cases)
-      
-      # Find rows that differ in the DB (validated_by, ncic_level, risk_score)
-      # Match by case_id; update only columns that officers write
+      if (is.null(cur) || nrow(cur) == 0) return()
+
       sync_cols <- c("ncic_level","ncic_label","section_13","validated_by",
                      "validated_at","action_taken","risk_score","risk_formula",
                      "risk_level","notes")
-      
-      changed <- fresh$case_id[sapply(seq_len(nrow(fresh)), function(i) {
-        cid  <- fresh$case_id[i]
-        crow <- cur[cur$case_id == cid, sync_cols, drop=FALSE]
-        if (nrow(crow) == 0) return(FALSE)
-        frow <- fresh[i, sync_cols, drop=FALSE]
-        !identical(as.list(crow[1,]), as.list(frow[1,]))
-      })]
-      
+
+      # Build a normalised string digest per row to avoid type-mismatch false positives
+      # (e.g. NA vs NA_character_, integer vs double, logical vs integer)
+      normalise_row <- function(df, i) {
+        vals <- df[i, intersect(sync_cols, names(df)), drop=FALSE]
+        paste(sapply(vals, function(v) {
+          if (is.na(v)) "__NA__" else as.character(v)
+        }), collapse="|")
+      }
+
+      # Build lookup: case_id → row index for current cases
+      cur_idx   <- setNames(seq_len(nrow(cur)),   cur$case_id)
+      fresh_idx <- setNames(seq_len(nrow(fresh)), fresh$case_id)
+
+      # Only compare case_ids present in both
+      common_ids <- intersect(names(cur_idx), names(fresh_idx))
+
+      changed <- character(0)
+      for (cid in common_ids) {
+        ci <- cur_idx[[cid]]
+        fi <- fresh_idx[[cid]]
+        if (normalise_row(cur, ci) != normalise_row(fresh, fi))
+          changed <- c(changed, cid)
+      }
+
       if (length(changed) > 0) {
         for (cid in changed) {
-          fi  <- which(fresh$case_id == cid)
-          ci  <- which(cur$case_id   == cid)
-          if (length(fi) == 0 || length(ci) == 0) next
-          for (col in sync_cols) {
+          ci <- cur_idx[[cid]]
+          fi <- fresh_idx[[cid]]
+          for (col in intersect(sync_cols, names(fresh))) {
             rv$cases[ci, col] <- fresh[fi, col]
           }
         }
         rv$last_db_sync <- Sys.time()
         message(sprintf("[sync] Updated %d case(s) from DB", length(changed)))
       }
+      # Silent when nothing changed — no message spam
     }, error=function(e) message("[sync] poll error: ", e$message))
   })
   
@@ -3942,7 +4015,13 @@ server <- function(input, output, session) {
     # API-only function — runs in future, returns NULL on any error
     call_api_only <- function(tweet, api_key) {
       fs  <- build_few_shot()
-      up  <- paste0(fs, 'Apply VIOLENCE OVERRIDE then ACTIVISM TEST.\nClassify: "',
+      # ── Language detection for bulk (same as single-post) ──────
+      lang_det_bulk <- tryCatch(detect_language(tweet),
+        error=function(e) list(code="other", label="Other",
+                               is_sheng=FALSE, is_mixed=FALSE, warning=NA_character_))
+      lang_hint_bulk <- build_language_hint(lang_det_bulk, tweet)
+      up  <- paste0(fs, lang_hint_bulk,
+                    'Apply VIOLENCE OVERRIDE then ACTIVISM TEST.\nClassify: "',
                     gsub('"', "'", tweet),
                     '"\nReturn: {"ncic_level":<0-5>,"label":"...","confidence":<0-100>,',
                     '"category":"...","is_activism":<true|false>,"reasoning":"...",',
@@ -4261,7 +4340,7 @@ server <- function(input, output, session) {
   })
   
   output$val_ui <- renderUI({
-    if (!rv$authenticated) return(auth_wall_ui())
+    if (!rv$authenticated) return(auth_wall_ui(rv$timed_out))
     pending <- rv$cases[is.na(rv$cases$validated_by)&rv$cases$ncic_level>=2,]
     pending <- pending[order(-pending$risk_score,-pending$ncic_level),]
     
@@ -4555,7 +4634,7 @@ server <- function(input, output, session) {
   
   # ── Learning Centre ────────────────────────────────────────
   output$learn_ui <- renderUI({
-    if (!rv$authenticated) return(auth_wall_ui())
+    if (!rv$authenticated) return(auth_wall_ui(rv$timed_out))
     ex  <- load_examples()
     dis <- load_disagreements()
     w   <- rv$kw_weights
@@ -4686,7 +4765,7 @@ server <- function(input, output, session) {
   
   # ── Forecast ───────────────────────────────────────────────────
   output$forecast_ui <- renderUI({
-    if (!rv$authenticated) return(auth_wall_ui())
+    if (!rv$authenticated) return(auth_wall_ui(rv$timed_out))
     
     now <- Sys.time()
     
@@ -5036,7 +5115,7 @@ server <- function(input, output, session) {
   })
   
   output$rep_ui <- renderUI({
-    if (!rv$authenticated) return(auth_wall_ui())
+    if (!rv$authenticated) return(auth_wall_ui(rv$timed_out))
     d        <- rv$cases
     n_total  <- nrow(d)
     n_s13    <- sum(d$section_13, na.rm=TRUE)
@@ -5252,6 +5331,7 @@ server <- function(input, output, session) {
       rv$officer_role   <- result$role
       rv$last_activity  <- Sys.time()
       rv$timeout_warned <- FALSE
+      rv$timed_out      <- FALSE
       shinyjs::html("auth_error", "")
       audit(un, nm, "LOGIN",
             detail     = paste0("Role: ", result$role),
@@ -5266,7 +5346,7 @@ server <- function(input, output, session) {
   
   # ── S13 Escalation Queue UI ───────────────────────────────────
   output$s13_ui <- renderUI({
-    if (!rv$authenticated) return(auth_wall_ui())
+    if (!rv$authenticated) return(auth_wall_ui(rv$timed_out))
     
     queue <- db_s13_load()
     
@@ -5495,7 +5575,7 @@ server <- function(input, output, session) {
   
   # ── Audit Log UI (admin only) ──────────────────────────────────
   output$audit_ui <- renderUI({
-    if (!rv$authenticated) return(auth_wall_ui())
+    if (!rv$authenticated) return(auth_wall_ui(rv$timed_out))
     
     # Role gate — officers see a polite message, not the data
     if (rv$officer_role != "admin") {

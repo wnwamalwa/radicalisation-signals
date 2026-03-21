@@ -32,6 +32,26 @@ library(bcrypt)
 DB_FILE   <- file.path("cache", "ews.sqlite")
 BCRYPT_COST <- 12L   # increase to 13-14 for higher security (slower)
 
+# ── Password strength checker ─────────────────────────────────────
+check_password_strength <- function(password, username) {
+  errors <- c()
+  if (nchar(password) < 10)
+    errors <- c(errors, "At least 10 characters required.")
+  if (!grepl("[A-Z]", password))
+    errors <- c(errors, "At least one uppercase letter required.")
+  if (!grepl("[a-z]", password))
+    errors <- c(errors, "At least one lowercase letter required.")
+  if (!grepl("[0-9]", password))
+    errors <- c(errors, "At least one digit required.")
+  if (!grepl("[^A-Za-z0-9]", password))
+    errors <- c(errors, "At least one special character required (e.g. ! @ # $ %).")
+  if (tolower(password) == tolower(username))
+    errors <- c(errors, "Password must not match the username.")
+  if (grepl("password|ncic|admin|officer|intel|kenya", tolower(password)))
+    errors <- c(errors, "Password must not contain common words (password, ncic, admin, kenya, intel).")
+  errors
+}
+
 if (!file.exists(DB_FILE))
   stop("Database not found at: ", DB_FILE,
        "\nRun the Shiny app at least once first to initialise the DB.")
@@ -93,8 +113,17 @@ if (cmd == "add") {
   
   if (!role %in% c("officer", "admin"))
     stop("Role must be 'officer' or 'admin'.")
-  if (nchar(password) < 8)
-    stop("Password must be at least 8 characters.")
+  
+  errs <- check_password_strength(password, username)
+  if (length(errs) > 0) {
+    cat("❌ Password rejected:\n")
+    for (e in errs) cat("  •", e, "\n")
+    cat("\nPassword requirements:\n")
+    cat("  • 10+ characters\n  • Upper + lowercase\n  • At least one digit\n")
+    cat("  • At least one special character\n  • Not the same as username\n")
+    cat("  • No common words (password, admin, ncic, etc.)\n")
+    stop("Password does not meet complexity requirements.")
+  }
   
   existing <- dbGetQuery(con, "SELECT username FROM officers WHERE username=?", list(username))
   if (nrow(existing) > 0)
@@ -115,8 +144,15 @@ if (cmd == "reset") {
   username <- trimws(tolower(args[2]))
   password <- args[3]
   
-  if (nchar(password) < 8)
-    stop("Password must be at least 8 characters.")
+  if (nchar(password) < 1)
+    stop("Password cannot be empty.")
+  
+  errs <- check_password_strength(password, username)
+  if (length(errs) > 0) {
+    cat("❌ Password rejected:\n")
+    for (e in errs) cat("  •", e, "\n")
+    stop("Password does not meet complexity requirements.")
+  }
   
   existing <- dbGetQuery(con, "SELECT username FROM officers WHERE username=?", list(username))
   if (nrow(existing) == 0)

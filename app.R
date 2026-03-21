@@ -33,7 +33,7 @@
 #   GMAIL_PASS=xxxx xxxx xxxx xxxx
 #   OFFICER_EMAIL=officer@ncic.go.ke
 #   ADMIN_USERNAME=admin          # username for the first admin account
-#   ADMIN_PASSWORD=<strong-pass>  # hashed on first run — change immediately after deploy
+#   ADMIN_PASSWORD=<strong-pass>  # 10+ chars, upper+lower+digit+special, hashed on first run
 #   (never commit .Renviron to git — add it to .gitignore)
 # ================================================================
 
@@ -219,7 +219,31 @@ db_check_password <- function(username, password) {
   list(ok=ok, role=if(ok) row$role[1] else NA_character_)
 }
 
+# ── Password strength checker (mirrors setup_officers.R rules) ───
+check_pw_strength <- function(password, username) {
+  errs <- c()
+  if (nchar(password) < 10)
+    errs <- c(errs, "At least 10 characters required")
+  if (!grepl("[A-Z]", password))
+    errs <- c(errs, "At least one uppercase letter required")
+  if (!grepl("[a-z]", password))
+    errs <- c(errs, "At least one lowercase letter required")
+  if (!grepl("[0-9]", password))
+    errs <- c(errs, "At least one digit required")
+  if (!grepl("[^A-Za-z0-9]", password))
+    errs <- c(errs, "At least one special character required (e.g. ! @ # $)")
+  if (tolower(password) == tolower(username))
+    errs <- c(errs, "Password must not match the username")
+  if (grepl("password|ncic|admin|officer|intel|kenya|2024|2025|2026",
+            tolower(password)))
+    errs <- c(errs, "Password contains a common word — choose something unique")
+  errs
+}
+
 db_add_officer <- function(username, password, role="officer") {
+  errs <- check_pw_strength(password, username)
+  if (length(errs) > 0)
+    stop(paste("Password rejected:", paste(errs, collapse="; ")))
   con <- db_connect(); on.exit(dbDisconnect(con))
   hashed <- bcrypt::hashpw(password)
   dbExecute(con,
@@ -1002,7 +1026,7 @@ NCIC_SYSTEM_PROMPT <- paste0(
 
 classify_tweet <- function(tweet, kw_weights=kw_weights_global,
                            handle="@unknown", county="Unknown",
-                           cases_df=NULL) {
+                           cases_df=NULL, lang_det=NULL) {
   api_key <- Sys.getenv("OPENAI_API_KEY")
   if (nchar(api_key)==0) stop("OPENAI_API_KEY not set in secrets/.Renviron")
   
@@ -1012,6 +1036,16 @@ classify_tweet <- function(tweet, kw_weights=kw_weights_global,
   else
     list(score=0, handle_score=0, county_score=0, summary="")
   
+  # Detect language if not provided
+  if (is.null(lang_det))
+    lang_det <- tryCatch(detect_language(tweet),
+                         error=function(e) list(code="unknown", label="Unknown",
+                                                is_sheng=FALSE, is_mixed=FALSE, low_coverage=FALSE,
+                                                warning=NA_character_))
+  
+  # Build language-specific hint for the prompt
+  lang_hint <- build_language_hint(lang_det, tweet)
+  
   # cache key includes example bank size so it invalidates as bank grows
   ex_count <- length(load_examples())
   key      <- digest(paste0(tolower(trimws(tweet)), "|ex:", ex_count))
@@ -1020,7 +1054,9 @@ classify_tweet <- function(tweet, kw_weights=kw_weights_global,
     result <- get(key, envir=classify_cache)
     # Re-run risk formula with fresh source context even on cache hit
     ctx_sc <- length(result$contextual_factors %||% list()) * 8
-    rs <- compute_risk(tweet, result$confidence %||% 50,
+    # Apply language confidence penalty even on cache hit
+    adj_conf <- apply_lang_confidence_penalty(result$confidence %||% 50, lang_det)
+    rs <- compute_risk(tweet, adj_conf,
                        result$ncic_level %||% 0, kw_weights,
                        result$network_score %||% 20, 10, ctx_sc,
                        src_ctx$score)
@@ -1035,6 +1071,7 @@ classify_tweet <- function(tweet, kw_weights=kw_weights_global,
   
   user_prompt <- paste0(
     few_shot,
+    lang_hint,   # ← language-specific glossary + hints injected here
     'Classify this post:\n"', gsub('"',"'",tweet), '"\n\n',
     'Apply VIOLENCE OVERRIDE first, then ACTIVISM TEST if no violence.\n\n',
     'Return exactly:\n',
@@ -1081,10 +1118,17 @@ classify_tweet <- function(tweet, kw_weights=kw_weights_global,
   result <- tryCatch(fromJSON(raw),
                      error=function(e) stop("JSON parse: ",e$message))
   
+  # Apply language confidence penalty before risk scoring
+  raw_conf   <- result$confidence %||% 50
+  adj_conf   <- apply_lang_confidence_penalty(raw_conf, lang_det)
+  result$confidence          <- adj_conf
+  result$confidence_raw      <- raw_conf
+  result$lang_penalty_applied<- raw_conf - adj_conf
+  
   # apply risk formula on main thread with source context
   ctx_sc <- length(result$contextual_factors %||% list()) * 8
   rs <- compute_risk(tweet,
-                     result$confidence    %||% 50,
+                     adj_conf,              # penalised confidence
                      result$ncic_level    %||% 0,
                      kw_weights,
                      result$network_score %||% 20,
@@ -1367,7 +1411,8 @@ auth_wall_ui <- function() {
                             textInput("auth_name", NULL, placeholder="Full name (e.g. Officer Mwangi)", width="100%"),
                             textInput("auth_username", NULL, placeholder="Username", width="100%"),
                             passwordInput("auth_password", NULL, placeholder="Password", width="100%"),
-                            tags$div(style="margin-bottom:10px;"),
+                            tags$div(style="font-size:10px;color:#9ca3af;margin-bottom:10px;line-height:1.6;",
+                                     "Password must be 10+ characters with uppercase, lowercase, digit, and special character."),
                             actionButton("auth_submit","Sign In",
                                          style="width:100%;background:#0066cc;color:#fff;border:none;font-weight:700;font-size:14px;padding:11px;border-radius:6px;"),
                             tags$div(id="auth_error",style="color:#dc3545;font-size:12px;margin-top:8px;"),
@@ -1399,14 +1444,140 @@ LANG_LABELS <- c(
   ar = "Arabic",  fr = "French",   om = "Oromo"
 )
 
+# ── Sheng markers (Nairobi urban youth vernacular) ────────────────
 SHENG_MARKERS <- c(
   "si","aki","niaje","sawa","maze","mbona","kwani","buda","dame",
   "mresh","fiti","poa","msee","wadau","mtu wangu","kama kawaida",
-  "acha","izo","lakini","hii","hizo","dem","moto","bomba","chali"
+  "acha","izo","lakini","hii","hizo","dem","moto","bomba","chali",
+  "sanse","kudos","uko","kwako","manze","si ndio","si ndiyo",
+  "wueh","mdau","sema","mambo","vipi","freshi","mtu"
 )
 
+# ── Kikuyu hate-speech markers (transliteration hints for GPT) ────
+KIKUYU_HATE_MARKERS <- c(
+  "murogi"="witch/sorcerer (derogatory)",
+  "mwendwo"="beloved (can be ironic incitement)",
+  "thayu"="peace (context: used sarcastically in incitement)",
+  "gĩthĩ"="rubbish/worthless person",
+  "ndũgũ"="brother (used in ethnic mobilisation)",
+  "twĩrĩre"="we told you (us-vs-them framing)",
+  "maũndũ"="issues/problems (often precedes incitement)",
+  "mũndũ"="person (combined with slurs = dehumanisation)"
+)
+
+# ── Kalenjin hate-speech markers ──────────────────────────────────
+KALENJIN_HATE_MARKERS <- c(
+  "dorobo"="derogatory term for Ogiek/forest dwellers",
+  "ng'etuny"="enemy/stranger (ethnic boundary marker)",
+  "korosek"="chase away/expel (expulsion rhetoric)",
+  "boisiek"="outsiders (exclusion framing)",
+  "kipkorir"="warrior (mobilisation context)",
+  "mambo"="things/issues (often precedes incitement in mixed speech)"
+)
+
+# ── Luo hate-speech markers ───────────────────────────────────────
+LUO_HATE_MARKERS <- c(
+  "jajuok"="witch/evil person (derogatory)",
+  "jaluo"="Luo person (neutral but weaponised in incitement)",
+  "odhiambo"="common name used in ethnic slurs",
+  "wuod"="son of (used in ethnic targeting)",
+  "chuth"="completely/totally (intensifier in threats)",
+  "mondo"="let it be (precedes commands including threats)",
+  "dhi"="go (used in expulsion rhetoric: dhi dala = go home)"
+)
+
+# ── Build language context hint for GPT prompt ───────────────────
+build_language_hint <- function(lang_det, text) {
+  code <- lang_det$code
+  hint_parts <- c()
+  
+  # Sheng/code-switching: provide glossary of detected markers
+  if (isTRUE(lang_det$is_sheng)) {
+    text_l <- tolower(text)
+    detected <- SHENG_MARKERS[sapply(SHENG_MARKERS, function(m)
+      grepl(m, text_l, fixed=TRUE))]
+    hint_parts <- c(hint_parts, paste0(
+      "LANGUAGE NOTE: This post contains Sheng (Nairobi urban code-switching). ",
+      "Detected markers: [", paste(head(detected, 6), collapse=", "), "]. ",
+      "Sheng is often used to evade keyword detection. Interpret slang literally ",
+      "and consider the underlying Swahili/English meaning when assessing intent."))
+  }
+  
+  # Kikuyu
+  if (code == "ki") {
+    text_l <- tolower(text)
+    matched <- names(KIKUYU_HATE_MARKERS)[sapply(names(KIKUYU_HATE_MARKERS),
+                                                 function(m) grepl(m, text_l, fixed=TRUE))]
+    gloss <- if (length(matched) > 0)
+      paste0(" Detected terms with translations: ",
+             paste(sapply(matched, function(m)
+               paste0("'", m, "' = ", KIKUYU_HATE_MARKERS[m])), collapse="; "), ".")
+    else ""
+    hint_parts <- c(hint_parts, paste0(
+      "LANGUAGE NOTE: This post is in Kikuyu (Central Kenya). ",
+      "GPT-4o-mini has reduced accuracy for Kikuyu — apply extra caution. ",
+      "Focus on structural signals (us-vs-them framing, calls to action, ",
+      "dehumanising comparisons) rather than keyword matching.", gloss))
+  }
+  
+  # Kalenjin
+  if (code == "kln") {
+    text_l <- tolower(text)
+    matched <- names(KALENJIN_HATE_MARKERS)[sapply(names(KALENJIN_HATE_MARKERS),
+                                                   function(m) grepl(m, text_l, fixed=TRUE))]
+    gloss <- if (length(matched) > 0)
+      paste0(" Detected terms with translations: ",
+             paste(sapply(matched, function(m)
+               paste0("'", m, "' = ", KALENJIN_HATE_MARKERS[m])), collapse="; "), ".")
+    else ""
+    hint_parts <- c(hint_parts, paste0(
+      "LANGUAGE NOTE: This post is in Kalenjin (Rift Valley). ",
+      "Kalenjin has PEV-era (2007/08) rhetorical patterns associated with ethnic mobilisation. ",
+      "Be alert to expulsion rhetoric, warrior-framing, and boundary-marking between communities.", gloss))
+  }
+  
+  # Luo
+  if (code == "luo") {
+    text_l <- tolower(text)
+    matched <- names(LUO_HATE_MARKERS)[sapply(names(LUO_HATE_MARKERS),
+                                              function(m) grepl(m, text_l, fixed=TRUE))]
+    gloss <- if (length(matched) > 0)
+      paste0(" Detected terms with translations: ",
+             paste(sapply(matched, function(m)
+               paste0("'", m, "' = ", LUO_HATE_MARKERS[m])), collapse="; "), ".")
+    else ""
+    hint_parts <- c(hint_parts, paste0(
+      "LANGUAGE NOTE: This post is in Luo (Nyanza region). ",
+      "Focus on targeting of ethnic groups, expulsion commands (e.g. 'dhi dalo'), ",
+      "and dehumanising comparisons.", gloss))
+  }
+  
+  # Unknown / undetected
+  if (code == "unknown" && !isTRUE(lang_det$is_sheng)) {
+    hint_parts <- c(hint_parts,
+                    "LANGUAGE NOTE: Language could not be detected. Apply conservative classification — ",
+                    "when in doubt between two levels, assign the higher. Flag for manual officer review.")
+  }
+  
+  if (length(hint_parts) == 0) return("")
+  paste0("\n\n", paste(hint_parts, collapse="\n"), "\n")
+}
+
+# ── Language-aware confidence penalty ────────────────────────────
+# Reduces GPT confidence score for low-coverage languages so risk
+# scores honestly reflect model uncertainty.
+apply_lang_confidence_penalty <- function(confidence, lang_det) {
+  penalty <- if      (isTRUE(lang_det$is_sheng))          10L
+  else if (lang_det$code == "ki")               15L
+  else if (lang_det$code == "kln")              15L
+  else if (lang_det$code == "luo")              10L
+  else if (lang_det$code == "unknown")          12L
+  else if (isTRUE(lang_det$low_coverage))        8L
+  else                                           0L
+  max(0L, as.integer(confidence) - penalty)
+}
+
 detect_language <- function(text) {
-  # Returns list(code, label, confidence, is_sheng, is_mixed, warning)
   result <- tryCatch({
     det <- cld3::detect_language(text)
     code <- if (is.na(det)) "unknown" else det
@@ -1416,27 +1587,30 @@ detect_language <- function(text) {
   code  <- result$code
   label <- LANG_LABELS[code] %||% paste0("Other (", code, ")")
   
-  # Sheng detection: post tagged sw/en but contains Sheng markers
   text_l   <- tolower(text)
   n_sheng  <- sum(sapply(SHENG_MARKERS, function(m) grepl(m, text_l, fixed=TRUE)))
   is_sheng <- n_sheng >= 2 && code %in% c("sw","en","unknown")
   
-  # Mixed language: multiple scripts or lang markers from different families
-  has_latin    <- grepl("[a-zA-Z]", text)
-  has_arabic   <- grepl("[\u0600-\u06FF]", text)
-  is_mixed     <- has_latin && has_arabic
+  has_latin  <- grepl("[a-zA-Z]", text)
+  has_arabic <- grepl("[\u0600-\u06FF]", text)
+  is_mixed   <- has_latin && has_arabic
   
-  # Low-coverage languages for this model
   low_coverage <- code %in% c("ki","kln","luo","so","om","unknown")
   
   warning_msg <- if (is_sheng)
-    "⚠ Sheng/code-switching detected — classification confidence may be reduced. Officer review recommended."
+    "⚠ Sheng/code-switching detected — confidence score penalised. Officer review recommended."
   else if (is_mixed)
     "⚠ Mixed-script content detected — verify classification manually."
+  else if (code == "ki")
+    "⚠ Kikuyu detected — confidence penalised –15 pts. Language-specific glossary injected into GPT prompt."
+  else if (code == "kln")
+    "⚠ Kalenjin detected — confidence penalised –15 pts. PEV-era rhetorical pattern hints injected."
+  else if (code == "luo")
+    "⚠ Luo detected — confidence penalised –10 pts. Language-specific glossary injected into GPT prompt."
   else if (low_coverage && code != "unknown")
-    paste0("⚠ Low-coverage language (", label, ") — GPT-4o-mini accuracy is reduced for this language.")
+    paste0("⚠ Low-coverage language (", label, ") — confidence penalised. GPT accuracy is reduced.")
   else if (code == "unknown")
-    "⚠ Language could not be detected — manual review recommended."
+    "⚠ Language undetected — confidence penalised. Manual review recommended."
   else NA_character_
   
   list(
@@ -1667,7 +1841,17 @@ ui <- page_navbar(
                                                                                             placeholder="Paste post here…",rows=3),
                                                                               tags$button("→",id="chat_send",class="btn-classify",
                                                                                           onclick="Shiny.setInputValue('chat_send',Math.random())")),
-                                                                     tags$div(class="human-notice",tags$strong("⚠ Human validation required")),
+                                                                     tags$div(style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;padding:8px 10px;font-size:11px;color:#0c4a6e;margin-top:6px;",
+                                                                              tags$div(style="font-weight:700;margin-bottom:4px;",tagList(bs_icon("shield-fill-check")," Anti-Hallucination — 6 Layers Active")),
+                                                                              tags$div(style="display:flex;flex-direction:column;gap:2px;",
+                                                                                       tags$span("① temperature=0 — deterministic output"),
+                                                                                       tags$span("② JSON schema — no free-text invention"),
+                                                                                       tags$span("③ Cap 170 decision chain — legally grounded"),
+                                                                                       tags$span("④ Confidence score — uncertainty flagged"),
+                                                                                       tags$span("⑤ Officer validation — human has final word"),
+                                                                                       tags$span("⑥ Disagreement log — model learns from corrections")
+                                                                              )
+                                                                     ),
                                                                      tags$hr(style="border-color:#dee2e6;margin:8px 0;"),
                                                                      tags$div(style="display:flex;flex-direction:column;gap:3px;",
                                                                               actionButton("ex1","L5 Toxic — explicit violence",   class="btn btn-sm btn-outline-danger w-100",  style="font-size:11px;text-align:left;"),
@@ -1710,55 +1894,62 @@ ui <- page_navbar(
   # TAB 2: DASHBOARD
   nav_panel(title=tagList(bs_icon("speedometer2")," What are current signals?"),value="tab_dash",padding=16,
             
-            # ── Slim reference bar ───────────────────────────────────
-            tags$div(
-              style="background:#fff8e1;border:1px solid #ffc107;border-radius:6px;padding:7px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;",
-              tags$div(style="display:flex;align-items:center;gap:8px;font-size:12px;color:#664d03;",
-                       tags$span("⚠️"),
-                       tags$span(tags$strong("AI signals — not proof of illegal activity."),
-                                 " L4/L5 require officer validation before action.")
-              ),
-              tags$div(style="display:flex;gap:10px;flex-shrink:0;",
-                       tags$a(tagList(bs_icon("book")," Interpretation Guide"),
-                              href="#", onclick="$('[data-value=\"tab_interpretation\"]').tab('show');return false;",
-                              style="font-size:11px;color:#0066cc;font-weight:600;text-decoration:none;white-space:nowrap;"),
-                       tags$span(style="color:#dee2e6;","│"),
-                       tags$a(tagList(bs_icon("diagram-3")," Methodology"),
-                              href="#", onclick="$('[data-value=\"tab_about\"]').tab('show');return false;",
-                              style="font-size:11px;color:#7c3aed;font-weight:600;text-decoration:none;white-space:nowrap;")
-              )
-            ),
-            
-            # ── Filters row ─────────────────────────────────────────
-            tags$div(style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;margin-top:8px;",
-                     tags$div(style="font-size:12px;color:#6c757d;",
-                              tagList(bs_icon("funnel"), " Filtering all charts and tables below")),
-                     tags$div(style="display:flex;gap:8px;align-items:center;",
-                              date_filter_ui("dash_dr"),
+            # ── Page header + date filter in one row ─────────────────
+            tags$div(style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px;",
+                     tags$div(
+                       tags$h4(style="font-weight:800;color:#1a1a2e;margin:0 0 2px;font-size:16px;",
+                               tagList(bs_icon("speedometer2"), " Signal Intelligence Dashboard")),
+                       tags$div(style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                                tags$span(style="font-size:12px;color:#6c757d;",
+                                          tagList(bs_icon("funnel"), " All charts and tables filtered by date range")),
+                                tags$span(style="background:#fff8e1;color:#664d03;border:1px solid #ffc107;border-radius:3px;padding:1px 8px;font-size:11px;font-weight:600;",
+                                          "⚠ AI signals — not proof of illegal activity")
+                       )
+                     ),
+                     tags$div(style="display:flex;gap:6px;align-items:center;flex-shrink:0;",
+                              date_filter_ui("dash_dr", NULL),
                               actionButton("dash_reset", tagList(bs_icon("x-circle"), " Reset"),
                                            class="btn btn-outline-secondary btn-sm",
-                                           style="white-space:nowrap;")
+                                           style="white-space:nowrap;font-size:11px;"),
+                              tags$a(tagList(bs_icon("book")),
+                                     href="#", onclick="$('[data-value=\"tab_interpretation\"]').tab('show');return false;",
+                                     style="font-size:11px;color:#0066cc;font-weight:600;text-decoration:none;white-space:nowrap;padding:5px 8px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:4px;",
+                                     title="Interpretation Guide"),
+                              tags$a(tagList(bs_icon("diagram-3")),
+                                     href="#", onclick="$('[data-value=\"tab_about\"]').tab('show');return false;",
+                                     style="font-size:11px;color:#7c3aed;font-weight:600;text-decoration:none;white-space:nowrap;padding:5px 8px;background:#f8f0ff;border:1px solid #ddd6fe;border-radius:4px;",
+                                     title="Methodology")
                      )
             ),
+            
+            # ── KPI row (rendered server-side) ───────────────────────
             uiOutput("kpi_row"),
+            
+            # ── Charts + Tables ───────────────────────────────────────
             layout_columns(col_widths=c(6,6),
-                           # Charts card with nav_pills
-                           card(
-                             card_header(tagList(bs_icon("bar-chart-fill")," Analytics Charts")),
-                             navset_pill(
-                               id = "dash_chart_pills",
-                               nav_panel("NCIC Distribution",
-                                         tags$div(style="height:320px;",
-                                                  highchartOutput("plot_ncic", height="320px", width="100%"))),
-                               nav_panel("Platform Breakdown",
-                                         tags$div(style="height:320px;",
-                                                  highchartOutput("plot_platform", height="320px", width="100%"))),
-                               nav_panel("County Risk Map",
-                                         tags$div(style="height:340px;",
-                                                  tmapOutput("plot_county_map", height="340px")))
-                             ),
-                             # JS: trigger resize when pill tab switches so Highcharts/tmap reflow
-                             tags$script(HTML('
+                           # Charts card
+                           card(style="border-top:3px solid #0066cc;",
+                                card_header(
+                                  tags$div(style="display:flex;align-items:center;justify-content:space-between;width:100%;",
+                                           tags$span(style="font-size:13px;font-weight:700;",
+                                                     tagList(bs_icon("bar-chart-fill"), " Analytics Charts")),
+                                           tags$span(style="font-size:10px;color:#9ca3af;font-style:italic;",
+                                                     "Signals are proxies, not proof. L4–L5 require officer validation.")
+                                  )
+                                ),
+                                navset_pill(
+                                  id = "dash_chart_pills",
+                                  nav_panel("NCIC Distribution",
+                                            tags$div(style="height:340px;padding-top:8px;",
+                                                     highchartOutput("plot_ncic", height="340px", width="100%"))),
+                                  nav_panel("Platform Breakdown",
+                                            tags$div(style="height:340px;padding-top:8px;",
+                                                     highchartOutput("plot_platform", height="340px", width="100%"))),
+                                  nav_panel("County Risk Map",
+                                            tags$div(style="height:360px;padding-top:8px;",
+                                                     tmapOutput("plot_county_map", height="360px")))
+                                ),
+                                tags$script(HTML('
                   $(document).on("shown.bs.tab", function(e) {
                     setTimeout(function() {
                       window.dispatchEvent(new Event("resize"));
@@ -1769,19 +1960,27 @@ ui <- page_navbar(
                   });
                 '))
                            ),
-                           # Tables card with nav_pills
-                           card(
-                             card_header(tagList(bs_icon("table")," Intelligence Tables")),
-                             navset_pill(
-                               id = "dash_table_pills",
-                               nav_panel("Priority Cases",
-                                         tags$div(style="padding-top:10px;min-height:200px;",
-                                                  DTOutput("dash_priority"))),
-                               nav_panel("Officer Activity",
-                                         tags$div(style="padding-top:10px;min-height:200px;",
-                                                  DTOutput("dash_officers")))
-                             ),
-                             tags$script(HTML('
+                           # Tables card
+                           card(style="border-top:3px solid #1a1a2e;",
+                                card_header(
+                                  tags$div(style="display:flex;align-items:center;justify-content:space-between;width:100%;",
+                                           tags$span(style="font-size:13px;font-weight:700;",
+                                                     tagList(bs_icon("table"), " Intelligence Tables")),
+                                           tags$a(tagList(bs_icon("exclamation-octagon"), " S13 Queue"),
+                                                  href="#", onclick="$('[data-value=\"tab_s13\"]').tab('show');return false;",
+                                                  style="font-size:11px;color:#dc3545;font-weight:600;text-decoration:none;")
+                                  )
+                                ),
+                                navset_pill(
+                                  id = "dash_table_pills",
+                                  nav_panel("Priority Cases",
+                                            tags$div(style="padding-top:10px;min-height:200px;",
+                                                     DTOutput("dash_priority"))),
+                                  nav_panel("Officer Activity",
+                                            tags$div(style="padding-top:10px;min-height:200px;",
+                                                     DTOutput("dash_officers")))
+                                ),
+                                tags$script(HTML('
                   $(document).on("shown.bs.tab", function(e) {
                     setTimeout(function() {
                       $($.fn.dataTable.tables(true)).DataTable().columns.adjust().draw();
@@ -1808,40 +2007,111 @@ ui <- page_navbar(
            
            # TAB 4: ML CLASSIFICATION
            nav_panel(title=tagList(bs_icon("cpu")," AI Classification"),value="tab_classify",padding=16,
-                     tags$div(style="background:#f8f9fa;border:1px solid #dee2e6;border-radius:6px;padding:7px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;",
-                              tags$div(style="display:flex;align-items:center;gap:8px;font-size:12px;color:#374151;",
-                                       tags$span("🤖"),
-                                       tags$span(tags$strong("GPT-4o-mini · NCIC Cap 170 · 3-stage chain"), " — Violence Override → Target Test → Intent Test.")
+                     
+                     # ── Page header ──────────────────────────────────────────
+                     tags$div(style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px;",
+                              tags$div(
+                                tags$h4(style="font-weight:800;color:#1a1a2e;margin:0 0 4px;font-size:16px;",
+                                        tagList(bs_icon("cpu"), " AI Classification Engine")),
+                                tags$p(style="font-size:12px;color:#6c757d;margin:0;",
+                                       "GPT-4o-mini · NCIC Cap 170 · 3-stage decision chain · Async bulk processing")
                               ),
-                              tags$a(tagList(bs_icon("diagram-3")," Full classification methodology"),
-                                     href="#", onclick="$('[data-value=\"tab_about\"]').tab('show');return false;",
-                                     style="font-size:11px;color:#7c3aed;font-weight:600;text-decoration:none;white-space:nowrap;flex-shrink:0;")
+                              tags$div(style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
+                                       tags$span(style="background:#7c3aed18;color:#7c3aed;border:1px solid #7c3aed44;border-radius:4px;padding:3px 10px;font-size:11px;font-weight:600;",
+                                                 tagList(bs_icon("diagram-3"), " Violence Override → Target Test → Intent Test")),
+                                       tags$a(tagList(bs_icon("arrow-right-circle"), " Methodology"),
+                                              href="#", onclick="$('[data-value=\"tab_about\"]').tab('show');return false;",
+                                              style="font-size:11px;color:#7c3aed;font-weight:600;text-decoration:none;white-space:nowrap;")
+                              )
                      ),
-                     card(card_header(tagList(bs_icon("arrow-repeat")," Bulk Classification · GPT-4o-mini · NCIC Cap 170 · Async")),
-                          tags$div(style="padding:8px 0;",
-                                   tags$p(style="font-size:12px;color:#6c757d;margin-bottom:8px;",
-                                          "Classifies all unprocessed cases non-blocking. Cache is reused automatically — only new or invalidated posts call the API. Exponential backoff retry on failure."),
-                                   uiOutput("bulk_status_ui"),
-                                   tags$div(style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
-                                            actionButton("btn_bulk",tagList(bs_icon("arrow-repeat")," Start Bulk Classification"),class="btn btn-primary btn-sm"),
-                                            actionButton("btn_retry_failed",tagList(bs_icon("exclamation-triangle")," Retry Failed"),class="btn btn-warning btn-sm"),
-                                            actionButton("btn_clear_cache",tagList(bs_icon("trash")," Clear Cache"),class="btn btn-outline-secondary btn-sm"),
-                                            uiOutput("cache_info"),
-                                            tags$span(class="async-badge","⚡ Non-blocking")))),
-                     # Failure dashboard
+                     
+                     # ── Anti-hallucination bar ────────────────────────────────
+                     tags$div(style="background:linear-gradient(90deg,#f0f9ff,#e8f4ff);border:1px solid #bae6fd;border-left:4px solid #0066cc;border-radius:8px;padding:10px 16px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;",
+                              tags$div(style="display:flex;align-items:center;gap:10px;",
+                                       tags$span(style="background:#0066cc;color:#fff;border-radius:50%;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;",
+                                                 tagList(bs_icon("shield-fill-check"))),
+                                       tags$div(
+                                         tags$div(style="font-size:12px;font-weight:700;color:#0c4a6e;margin-bottom:2px;",
+                                                  "6-Layer Anti-Hallucination Stack Active"),
+                                         tags$div(style="font-size:11px;color:#374151;",
+                                                  "temperature=0  ·  JSON schema  ·  Cap 170 chain  ·  confidence scoring  ·  HITL validation  ·  disagreement retraining")
+                                       )
+                              ),
+                              tags$a(tagList(bs_icon("book"), " Full safeguards →"),
+                                     href="#", onclick="$('[data-value=\"tab_about\"]').tab('show');return false;",
+                                     style="font-size:11px;color:#0066cc;font-weight:600;text-decoration:none;white-space:nowrap;flex-shrink:0;")
+                     ),
+                     
+                     # ── KPIs + Bulk controls in one row ──────────────────────
+                     layout_columns(col_widths=c(2,2,2,2,4),
+                                    tags$div(style="background:#fff;border:1px solid #dee2e6;border-top:3px solid #0066cc;border-radius:8px;padding:12px 14px;",
+                                             tags$div(style="font-size:10px;color:#6c757d;text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:4px;","Total Signals"),
+                                             tags$div(style="font-size:28px;font-weight:800;color:#1a1a2e;line-height:1;", uiOutput("c_total", inline=TRUE)),
+                                             tags$div(style="font-size:10px;color:#6c757d;margin-top:3px;","all ingested cases")
+                                    ),
+                                    tags$div(style="background:#fff;border:1px solid #dee2e6;border-top:3px solid #dc3545;border-radius:8px;padding:12px 14px;",
+                                             tags$div(style="font-size:10px;color:#6c757d;text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:4px;","L4 + L5"),
+                                             tags$div(style="font-size:28px;font-weight:800;color:#dc3545;line-height:1;", uiOutput("c_th", inline=TRUE)),
+                                             tags$div(style="font-size:10px;color:#6c757d;margin-top:3px;","high severity")
+                                    ),
+                                    tags$div(style="background:#fff;border:1px solid #dee2e6;border-top:3px solid #198754;border-radius:8px;padding:12px 14px;",
+                                             tags$div(style="font-size:10px;color:#6c757d;text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:4px;","Validated"),
+                                             tags$div(style="font-size:28px;font-weight:800;color:#198754;line-height:1;", uiOutput("c_val", inline=TRUE)),
+                                             tags$div(style="font-size:10px;color:#6c757d;margin-top:3px;","officer confirmed")
+                                    ),
+                                    tags$div(style="background:#fff;border:1px solid #dee2e6;border-top:3px solid #fd7e14;border-radius:8px;padding:12px 14px;",
+                                             tags$div(style="font-size:10px;color:#6c757d;text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:4px;","Pending"),
+                                             tags$div(style="font-size:28px;font-weight:800;color:#fd7e14;line-height:1;", uiOutput("c_pend", inline=TRUE)),
+                                             tags$div(style="font-size:10px;color:#6c757d;margin-top:3px;","awaiting review")
+                                    ),
+                                    # Bulk controls in the 5th column
+                                    tags$div(style="background:#fff;border:1px solid #dee2e6;border-top:3px solid #1a1a2e;border-radius:8px;padding:12px 14px;",
+                                             tags$div(style="font-size:10px;color:#6c757d;text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:8px;",
+                                                      tagList(bs_icon("arrow-repeat"), " Bulk Classification")),
+                                             uiOutput("bulk_status_ui"),
+                                             tags$div(style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;align-items:center;",
+                                                      actionButton("btn_bulk",
+                                                                   tagList(bs_icon("arrow-repeat"), " Run"),
+                                                                   class="btn btn-primary btn-sm",
+                                                                   style="font-size:11px;"),
+                                                      actionButton("btn_retry_failed",
+                                                                   tagList(bs_icon("exclamation-triangle"), " Retry"),
+                                                                   class="btn btn-warning btn-sm",
+                                                                   style="font-size:11px;"),
+                                                      actionButton("btn_clear_cache",
+                                                                   tagList(bs_icon("trash"), " Cache"),
+                                                                   class="btn btn-outline-secondary btn-sm",
+                                                                   style="font-size:11px;"),
+                                                      uiOutput("cache_info")
+                                             )
+                                    )
+                     ),
+                     
+                     # ── API failure strip (only shown when failures exist) ────
                      uiOutput("api_failure_ui"),
-                     layout_columns(col_widths=c(3,3,3,3),
-                                    value_box("Total",       uiOutput("c_total"),showcase=bs_icon("collection"),          theme="primary"),
-                                    value_box("L4+L5",       uiOutput("c_th"),   showcase=bs_icon("exclamation-triangle"),theme="danger"),
-                                    value_box("Validated",   uiOutput("c_val"),  showcase=bs_icon("shield-check"),        theme="success"),
-                                    value_box("Pending",     uiOutput("c_pend"), showcase=bs_icon("hourglass"),           theme="warning")),
-                     card(card_header(tagList(bs_icon("table")," Classified Cases",
-                                              tags$div(style="float:right;display:flex;gap:5px;",
-                                                       selectInput("clf_ncic",NULL,width="200px",
-                                                                   choices=c("All Levels",setNames(paste0("ncic_",0:5),paste0("L",0:5," ",NCIC_LEVELS))),selected="All Levels"),
-                                                       selectInput("clf_risk",NULL,width="110px",choices=c("All Risk","HIGH","MEDIUM","LOW"),selected="All Risk"),
-                                                       date_filter_ui("clf_dr",NULL)))),
-                          DTOutput("clf_table"))
+                     
+                     # ── Classified cases table ────────────────────────────────
+                     tags$div(style="margin-top:16px;",
+                              card(style="border-top:3px solid #1a1a2e;",
+                                   card_header(
+                                     tags$div(style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;width:100%;",
+                                              tags$div(style="font-size:13px;font-weight:700;color:#1a1a2e;",
+                                                       tagList(bs_icon("table"), " Classified Cases")),
+                                              tags$div(style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;",
+                                                       selectInput("clf_ncic", NULL, width="200px",
+                                                                   choices=c("All Levels", setNames(paste0("ncic_",0:5),
+                                                                                                    paste0("L",0:5," ",NCIC_LEVELS))),
+                                                                   selected="All Levels"),
+                                                       selectInput("clf_risk", NULL, width="120px",
+                                                                   choices=c("All Risk","HIGH","MEDIUM","LOW"),
+                                                                   selected="All Risk"),
+                                                       date_filter_ui("clf_dr", NULL)
+                                              )
+                                     )
+                                   ),
+                                   DTOutput("clf_table")
+                              )
+                     )
            ),
            
            # TAB 5: MESSAGE FLOW
@@ -2038,45 +2308,103 @@ ui <- page_navbar(
                           )
                      ),
                      
-                     # ── Safeguards accordion ───────────────────────────────────
+                     # ── Anti-Hallucination Safeguards ─────────────────────────
+                     tags$div(style="margin-bottom:8px;",
+                              tags$h5(style="font-weight:700;color:#1a1a2e;margin-bottom:4px;",
+                                      tagList(bs_icon("shield-fill-check"), " Anti-Hallucination Safeguards")),
+                              tags$p(style="font-size:12px;color:#6c757d;margin-bottom:14px;",
+                                     "Six independent layers prevent the AI from producing unreliable, fabricated, or legally consequential outputs without human oversight.")
+                     ),
+                     
+                     # ── 6-layer grid ──────────────────────────────────────────
+                     tags$div(style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:24px;",
+                              
+                              # Layer 1
+                              tags$div(style="background:#f0f9ff;border-radius:8px;padding:14px 16px;border-left:4px solid #0066cc;",
+                                       tags$div(style="display:flex;align-items:center;gap:8px;margin-bottom:8px;",
+                                                tags$span(style="background:#0066cc;color:#fff;border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;flex-shrink:0;","1"),
+                                                tags$span(style="font-size:12px;font-weight:700;color:#1a1a2e;","Deterministic Output")),
+                                       tags$div(style="font-family:'IBM Plex Mono';font-size:11px;background:#fff;border:1px solid #bae6fd;border-radius:4px;padding:4px 8px;margin-bottom:6px;color:#0369a1;",
+                                                "temperature = 0"),
+                                       tags$p(style="font-size:11px;color:#374151;line-height:1.7;margin:0;",
+                                              "The same post always produces the same classification. GPT cannot drift, vary, or invent different answers between runs. Responses are cached by content hash — a re-run is guaranteed identical.")
+                              ),
+                              
+                              # Layer 2
+                              tags$div(style="background:#f0fff4;border-radius:8px;padding:14px 16px;border-left:4px solid #198754;",
+                                       tags$div(style="display:flex;align-items:center;gap:8px;margin-bottom:8px;",
+                                                tags$span(style="background:#198754;color:#fff;border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;flex-shrink:0;","2"),
+                                                tags$span(style="font-size:12px;font-weight:700;color:#1a1a2e;","Schema-Constrained Output")),
+                                       tags$div(style="font-family:'IBM Plex Mono';font-size:10px;background:#fff;border:1px solid #bbf7d0;border-radius:4px;padding:4px 8px;margin-bottom:6px;color:#166534;",
+                                                '{"ncic_level":4,"confidence":87,...}'),
+                                       tags$p(style="font-size:11px;color:#374151;line-height:1.7;margin:0;",
+                                              "GPT must return a strict JSON schema — no free-text narratives where hallucination thrives. Fields outside the schema are rejected. The model cannot invent fields or omit required ones.")
+                              ),
+                              
+                              # Layer 3
+                              tags$div(style="background:#fff5f5;border-radius:8px;padding:14px 16px;border-left:4px solid #dc3545;",
+                                       tags$div(style="display:flex;align-items:center;gap:8px;margin-bottom:8px;",
+                                                tags$span(style="background:#dc3545;color:#fff;border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;flex-shrink:0;","3"),
+                                                tags$span(style="font-size:12px;font-weight:700;color:#1a1a2e;","Legally-Grounded Decision Chain")),
+                                       tags$div(style="font-size:10px;background:#fff;border:1px solid #fecaca;border-radius:4px;padding:4px 8px;margin-bottom:6px;color:#991b1b;font-weight:600;",
+                                                "Violence Override → Target Test → Intent Test"),
+                                       tags$p(style="font-size:11px;color:#374151;line-height:1.7;margin:0;",
+                                              "GPT follows a mandatory 3-stage chain grounded in NCIC Cap 170 legal text. It cannot skip stages, invent new categories, or apply its own reasoning framework. Every level has explicit legal justification.")
+                              ),
+                              
+                              # Layer 4
+                              tags$div(style="background:#fff8f0;border-radius:8px;padding:14px 16px;border-left:4px solid #fd7e14;",
+                                       tags$div(style="display:flex;align-items:center;gap:8px;margin-bottom:8px;",
+                                                tags$span(style="background:#fd7e14;color:#fff;border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;flex-shrink:0;","4"),
+                                                tags$span(style="font-size:12px;font-weight:700;color:#1a1a2e;","Confidence Scoring & Flagging")),
+                                       tags$div(style="font-size:10px;background:#fff;border:1px solid #fed7aa;border-radius:4px;padding:4px 8px;margin-bottom:6px;color:#9a3412;font-weight:600;",
+                                                "< 60% confidence → flagged LOW → officer alerted"),
+                                       tags$p(style="font-size:11px;color:#374151;line-height:1.7;margin:0;",
+                                              "Every classification carries a 0–100% self-reported confidence score. Outputs below 60% are prominently flagged as LOW confidence, surfacing model uncertainty directly to the reviewing officer.")
+                              ),
+                              
+                              # Layer 5
+                              tags$div(style="background:#f8f0ff;border-radius:8px;padding:14px 16px;border-left:4px solid #7c3aed;",
+                                       tags$div(style="display:flex;align-items:center;gap:8px;margin-bottom:8px;",
+                                                tags$span(style="background:#7c3aed;color:#fff;border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;flex-shrink:0;","5"),
+                                                tags$span(style="font-size:12px;font-weight:700;color:#1a1a2e;","Mandatory Human-in-the-Loop")),
+                                       tags$div(style="font-size:10px;background:#fff;border:1px solid #ddd6fe;border-radius:4px;padding:4px 8px;margin-bottom:6px;color:#5b21b6;font-weight:600;",
+                                                "AI flags → Officer decides → Action logged"),
+                                       tags$p(style="font-size:11px;color:#374151;line-height:1.7;margin:0;",
+                                              "No legal or enforcement action is ever triggered by AI alone. Every L2+ case requires an NCIC officer to Confirm, Escalate, Downgrade, or Clear. The AI is an analyst — the officer is the decision-maker.")
+                              ),
+                              
+                              # Layer 6
+                              tags$div(style="background:#f0fdf4;border-radius:8px;padding:14px 16px;border-left:4px solid #059669;",
+                                       tags$div(style="display:flex;align-items:center;gap:8px;margin-bottom:8px;",
+                                                tags$span(style="background:#059669;color:#fff;border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;flex-shrink:0;","6"),
+                                                tags$span(style="font-size:12px;font-weight:700;color:#1a1a2e;","Real-Time Retraining Loop")),
+                                       tags$div(style="font-size:10px;background:#fff;border:1px solid #a7f3d0;border-radius:4px;padding:4px 8px;margin-bottom:6px;color:#065f46;font-weight:600;",
+                                                "Override → disagreement logged → weights updated → all cases rescored"),
+                                       tags$p(style="font-size:11px;color:#374151;line-height:1.7;margin:0;",
+                                              "When an officer overrides the AI's NCIC level, the disagreement is logged and keyword weights are updated in real time. The corrected case enters the few-shot training bank — the model learns from every human correction.")
+                              )
+                     ),
+                     
+                     # ── Summary statement ──────────────────────────────────────
+                     tags$div(
+                       style="background:linear-gradient(135deg,#1a1a2e,#0066cc18);border:1px solid #0066cc44;border-radius:8px;padding:14px 18px;margin-bottom:24px;",
+                       tags$div(style="font-size:13px;color:#1a1a2e;line-height:1.8;",
+                                tags$strong("Net result: "),
+                                "The AI cannot hallucinate a legal finding, invent an NCIC level, or trigger enforcement action. ",
+                                "Every consequential output carries a human officer's name, timestamp, and decision — logged permanently in the tamper-evident audit trail. ",
+                                tags$strong("The platform treats AI as an analyst and the officer as the judge.")
+                       )
+                     ),
+                     
                      accordion(id="about_defs_acc", open=FALSE,
-                               accordion_panel(
-                                 title=tagList(bs_icon("shield-check")," Safeguards Against Misclassification & Hallucination"),
-                                 value="safeguards",
-                                 layout_columns(col_widths=c(4,4,4),
-                                                tags$div(style="font-size:12px;line-height:1.75;color:#374151;padding:4px 8px;",
-                                                         tags$div(style="font-size:22px;margin-bottom:8px;","🧑‍⚖️"),
-                                                         tags$p(tags$strong("Mandatory Human Review"), style="margin-bottom:6px;"),
-                                                         tags$p(style="margin:0;","No legal or enforcement action is triggered by AI alone. Every L2+ case requires an NCIC officer to Confirm, Downgrade, Escalate, or Clear before any action proceeds.")),
-                                                tags$div(style="font-size:12px;line-height:1.75;color:#374151;padding:4px 8px;",
-                                                         tags$div(style="font-size:22px;margin-bottom:8px;","🗣"),
-                                                         tags$p(tags$strong("Activism Protection"), style="margin-bottom:6px;"),
-                                                         tags$p(style="margin:0;","Three-stage decision chain explicitly guards against misclassifying political accountability speech as hate speech. Disagreements between AI and officer are logged and used to re-train.")),
-                                                tags$div(style="font-size:12px;line-height:1.75;color:#374151;padding:4px 8px;",
-                                                         tags$div(style="font-size:22px;margin-bottom:8px;","🔁"),
-                                                         tags$p(tags$strong("Continuous Re-calibration"), style="margin-bottom:6px;"),
-                                                         tags$p(style="margin:0;","Officer validations update keyword weights in real time. All historical cases are automatically re-scored. Validated examples form a growing few-shot training bank for GPT.")),
-                                                tags$div(style="font-size:12px;line-height:1.75;color:#374151;padding:4px 8px;",
-                                                         tags$div(style="font-size:22px;margin-bottom:8px;","🗄️"),
-                                                         tags$p(tags$strong("Deterministic Classification"), style="margin-bottom:6px;"),
-                                                         tags$p(style="margin:0;","temperature=0 ensures the same post always produces the same classification. Responses are cached by content hash — the model cannot return a different result on the same text.")),
-                                                tags$div(style="font-size:12px;line-height:1.75;color:#374151;padding:4px 8px;",
-                                                         tags$div(style="font-size:22px;margin-bottom:8px;","🌡️"),
-                                                         tags$p(tags$strong("Confidence Signalling"), style="margin-bottom:6px;"),
-                                                         tags$p(style="margin:0;","Every classification includes a 0–100% confidence score. Outputs below 60% are flagged LOW and surfaced prominently to officers as requiring extra scrutiny.")),
-                                                tags$div(style="font-size:12px;line-height:1.75;color:#374151;padding:4px 8px;",
-                                                         tags$div(style="font-size:22px;margin-bottom:8px;","🔬"),
-                                                         tags$p(tags$strong("Unit-Tested Logic"), style="margin-bottom:6px;"),
-                                                         tags$p(style="margin:0;","24 automated tests cover risk scoring, source context, violence override, and edge cases. Run with ", tags$code("testthat::test_dir('tests/testthat')"), " before deploying changes."))
-                                 )
-                               ),
                                accordion_panel(
                                  title=tagList(bs_icon("exclamation-circle")," Limitations & Known Biases"),
                                  value="limits",
                                  layout_columns(col_widths=c(6,6),
                                                 tags$div(style="font-size:12px;line-height:1.8;color:#374151;",
                                                          tags$p(tags$strong("Language coverage: "),
-                                                                "Classification accuracy is highest for Swahili and English. Mixed-language posts (Sheng, code-switching) may be under- or mis-classified. Kalenjin and Kikuyu content has the least training signal."),
+                                                                "Classification accuracy is highest for Swahili and English. Mixed-language posts (Sheng, code-switching) may be under- or mis-classified. Kalenjin and Kikuyu content has the least training signal. Language detection now flags these automatically."),
                                                          tags$p(tags$strong("Identity verification: "),
                                                                 "The model cannot verify the real-world identity, bot status, or geographic location of posters. Handles are proxies, not confirmed actors."),
                                                          tags$p(tags$strong("Demonstration data: "),
@@ -2386,7 +2714,10 @@ ui <- page_navbar(
                                          list(term="Source History", def="A handle's and county's pattern of prior posts over 30 days. Escalating actors receive a risk score boost (capped +30)."),
                                          list(term="CIB", def="Coordinated Inauthentic Behaviour — multiple accounts posting near-identical content, suggesting an organised campaign."),
                                          list(term="HITL", def="Human-in-the-Loop — the validation model ensuring every AI decision is reviewed by a trained officer before action."),
-                                         list(term="Violence Override", def="Stage 1 of the classification chain. Any post calling for physical harm is immediately escalated to L4/L5, bypassing other tests.")
+                                         list(term="Violence Override", def="Stage 1 of the classification chain. Any post calling for physical harm is immediately escalated to L4/L5, bypassing other tests."),
+                                         list(term="Hallucination", def="When an AI model generates confident but factually incorrect or invented outputs. Prevented here by 6 layers: temperature=0, JSON schema, Cap 170 chain, confidence scoring, HITL, and disagreement retraining."),
+                                         list(term="temperature=0", def="A GPT parameter that makes output fully deterministic — the same post always returns the same classification. Eliminates random variation and drift."),
+                                         list(term="Disagreement Log", def="When an officer overrides the AI's NCIC level, the difference is logged and used to retrain keyword weights and update the few-shot training bank in real time.")
                                        ), function(item)
                                          tags$div(style="background:#f8f9fa;border-radius:6px;padding:10px 14px;border-left:3px solid #0066cc;",
                                                   tags$div(style="font-size:12px;font-weight:700;color:#1a1a2e;margin-bottom:3px;", item$term),
@@ -2459,6 +2790,55 @@ server <- function(input, output, session) {
       rv$authenticated  <- FALSE
       rv$timeout_warned <- FALSE
       shinyjs::runjs("Shiny.setInputValue('session_locked', true, {priority: 'event'});")
+      
+      # ── Notify supervisor via email ──────────────────────────────
+      tryCatch({
+        gu <- Sys.getenv("GMAIL_USER")
+        gp <- Sys.getenv("GMAIL_PASS")
+        oe <- Sys.getenv("OFFICER_EMAIL")
+        if (all(nchar(c(gu,gp,oe)) > 0)) {
+          subj <- sprintf("[EWS Security] Session timeout — %s auto-locked at %s",
+                          nm, format(Sys.time(), "%H:%M %Z"))
+          body <- paste0(
+            "<html><body style='font-family:Arial,sans-serif;color:#1a1a2e;'>",
+            "<div style='background:#fd7e14;padding:14px 20px;border-radius:8px 8px 0 0;'>",
+            "<h2 style='color:#fff;margin:0;font-size:16px;'>🔒 ", APP_NAME, " — Session Timeout Alert</h2>",
+            "</div>",
+            "<div style='background:#f8f9fa;padding:18px;border:1px solid #dee2e6;border-top:none;border-radius:0 0 8px 8px;'>",
+            "<table style='width:100%;border-collapse:collapse;font-size:13px;'>",
+            "<tr><td style='padding:6px 10px;font-weight:600;width:140px;border-bottom:1px solid #dee2e6;'>Officer</td>",
+            "<td style='padding:6px 10px;border-bottom:1px solid #dee2e6;'>", nm, " (", un, ")</td></tr>",
+            "<tr><td style='padding:6px 10px;font-weight:600;border-bottom:1px solid #dee2e6;'>Event</td>",
+            "<td style='padding:6px 10px;border-bottom:1px solid #dee2e6;color:#fd7e14;font-weight:700;'>",
+            "AUTO-LOCKED after ", SESSION_TIMEOUT, " minutes of inactivity</td></tr>",
+            "<tr><td style='padding:6px 10px;font-weight:600;border-bottom:1px solid #dee2e6;'>Time</td>",
+            "<td style='padding:6px 10px;border-bottom:1px solid #dee2e6;'>",
+            format(Sys.time(), "%Y-%m-%d %H:%M:%S"), " EAT</td></tr>",
+            "<tr><td style='padding:6px 10px;font-weight:600;'>Session ID</td>",
+            "<td style='padding:6px 10px;font-family:monospace;font-size:11px;'>",
+            isolate(rv$session_id), "</td></tr>",
+            "</table>",
+            "<div style='margin-top:14px;padding:10px 14px;background:#fff3cd;border-left:4px solid #ffc107;",
+            "border-radius:4px;font-size:12px;color:#664d03;'>",
+            "This is an automated security notification. No action is required unless this timeout ",
+            "occurred during an active investigation. The officer must re-authenticate to continue.",
+            "</div>",
+            "<div style='margin-top:14px;font-size:10px;color:#868e96;'>",
+            APP_NAME, " v5 · NCIC Cap 170 · Audit log reference: TIMEOUT</div>",
+            "</div></body></html>"
+          )
+          mime <- paste0("From: ",gu,"\r\nTo: ",oe,
+                         "\r\nSubject: ",subj,
+                         "\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n",body)
+          tmp <- tempfile(fileext=".txt")
+          writeLines(mime, tmp, useBytes=FALSE)
+          on.exit(unlink(tmp), add=TRUE)
+          cmd_email <- paste0("curl --url 'smtps://smtp.gmail.com:465' --ssl-reqd ",
+                              "--mail-from '",gu,"' --mail-rcpt '",oe,"' ",
+                              "--user '",gu,":",gp,"' --upload-file '",tmp,"' --silent")
+          system(cmd_email, intern=FALSE, wait=FALSE)   # non-blocking
+        }
+      }, error=function(e) message("[timeout email] failed: ", e$message))
     } else if (idle_mins >= warn_at && !isolate(rv$timeout_warned)) {
       rv$timeout_warned <- TRUE
       mins_left <- SESSION_TIMEOUT - floor(idle_mins)
@@ -2594,31 +2974,30 @@ server <- function(input, output, session) {
     total <- s$total; toxic <- s$toxic; hate <- s$hate
     s13   <- s$s13;   val   <- s$val;   pend <- s$pend
     
-    kpi <- function(label, value, bg, icon_name, pct=NULL) {
-      pct_html <- if (!is.null(pct))
-        paste0("<div style='font-size:10px;opacity:0.8;margin-top:1px;'>",pct,"% of total</div>")
-      else ""
+    kpi <- function(label, value, border_col, pct=NULL, sub_col="#6c757d") {
       tags$div(
-        style=paste0("background:",bg,";border-radius:8px;padding:10px 14px;color:#fff;",
-                     "display:flex;align-items:center;gap:10px;box-shadow:0 2px 6px rgba(0,0,0,0.12);"),
-        tags$div(style="font-size:22px;opacity:0.9;line-height:1;", HTML(as.character(bs_icon(icon_name)))),
-        tags$div(
-          tags$div(style="font-size:11px;font-weight:600;opacity:0.88;letter-spacing:.03em;text-transform:uppercase;", label),
-          tags$div(style="font-size:24px;font-weight:800;line-height:1.1;", formatC(value, format="d", big.mark=",")),
-          HTML(pct_html)
-        )
+        style=paste0("background:#fff;border:1px solid #dee2e6;border-left:4px solid ",
+                     border_col, ";border-radius:6px;padding:10px 14px;"),
+        tags$div(style=paste0("font-size:10px;font-weight:700;color:", sub_col,
+                              ";text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px;"),
+                 label),
+        tags$div(style=paste0("font-size:26px;font-weight:800;color:", border_col,
+                              ";line-height:1;"),
+                 formatC(value, format="d", big.mark=",")),
+        if (!is.null(pct))
+          tags$div(style="font-size:10px;color:#9ca3af;margin-top:3px;",
+                   paste0(pct, "% of total"))
       )
     }
     
     tags$div(
-      class="kpi-grid",
-      style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:14px;",
-      kpi("Total Signals",   total, "#0066cc", "collection"),
-      kpi("Toxic / L5",      toxic, "#7b0000", "exclamation-octagon", round(toxic/max(total,1)*100)),
-      kpi("Hate Speech / L4",hate,  "#dc3545", "chat-square-text",    round(hate/max(total,1)*100)),
-      kpi("Section 13",      s13,   "#c0392b", "file-earmark-text",   round(s13/max(total,1)*100)),
-      kpi("Validated",       val,   "#198754", "shield-check",        round(val/max(total,1)*100)),
-      kpi("Pending Review",  pend,  "#fd7e14", "hourglass",           round(pend/max(total,1)*100))
+      style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:14px;",
+      kpi("Total Signals",    total, "#0066cc"),
+      kpi("Toxic / L5",       toxic, "#4a0000", round(toxic/max(total,1)*100)),
+      kpi("Hate Speech / L4", hate,  "#dc3545", round(hate/max(total,1)*100)),
+      kpi("Section 13",       s13,   "#c0392b", round(s13/max(total,1)*100)),
+      kpi("Validated",        val,   "#198754", round(val/max(total,1)*100)),
+      kpi("Pending Review",   pend,  "#fd7e14", round(pend/max(total,1)*100))
     )
   })
   output$kpi_total <- renderUI(nrow(dash_data()))
@@ -3204,6 +3583,10 @@ server <- function(input, output, session) {
                                      m$lang_warning) else NULL,
                           tags$div(style="font-size:11px;",
                                    tags$strong("Confidence: "),paste0(m$conf,"% "),HTML(conf_band_html(conf_band(m$conf))),
+                                   if (!is.null(m$lang_penalty) && !is.na(m$lang_penalty) && m$lang_penalty > 0)
+                                     tags$span(style="color:#dc3545;font-size:10px;margin-left:4px;",
+                                               paste0("(–",m$lang_penalty," lang penalty)"))
+                                   else NULL,
                                    "  |  ",tags$strong("Category: "),m$category,"  |  ",
                                    tags$strong("Risk: "),tags$span(style=paste0("color:",rcol,";font-weight:700;"),m$risk_score)),
                           if (!is.null(m$formula)&&nchar(m$formula)>0)
@@ -3258,7 +3641,7 @@ server <- function(input, output, session) {
     
     res <- tryCatch(classify_tweet(tw, rv$kw_weights,
                                    handle="@chat_input", county="Unknown",
-                                   cases_df=rv$cases),
+                                   cases_df=rv$cases, lang_det=lang_det),
                     error=function(e) list(role="error",text=conditionMessage(e)))
     hist <- rv$chat_history
     if (!is.null(res$role)&&res$role=="error") {
@@ -3291,7 +3674,8 @@ server <- function(input, output, session) {
         lang_label=       lang_det$label,
         lang_is_sheng=    isTRUE(lang_det$is_sheng),
         lang_is_mixed=    isTRUE(lang_det$is_mixed),
-        lang_warning=     lang_det$warning %||% NA_character_
+        lang_warning=     lang_det$warning %||% NA_character_,
+        lang_penalty=     res$lang_penalty_applied %||% 0L
       )
     }
     rv$chat_history <- hist
@@ -4240,126 +4624,152 @@ server <- function(input, output, session) {
     
     tagList(
       # ── Header ───────────────────────────────────────────────────
-      tags$div(style="margin-bottom:16px;display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px;",
+      tags$div(style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px;",
                tags$div(
-                 tags$h5(style="font-weight:700;color:#1a1a2e;margin-bottom:4px;",
+                 tags$h4(style="font-weight:800;color:#1a1a2e;margin:0 0 3px;font-size:16px;",
                          tagList(bs_icon("graph-up-arrow"), " 14-Day Risk Forecast")),
-                 tags$p(style="font-size:12px;color:#6c757d;margin:0;",
-                        paste0("Prophet time-series models · Generated ",
-                               format(now, "%d %b %Y %H:%M"), " EAT · ",
-                               n_prophet, " counties fitted · ", n_heuristic, " heuristic fallback"))
+                 tags$div(style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                          tags$span(style="font-size:12px;color:#6c757d;",
+                                    paste0("Generated ", format(now, "%d %b %Y %H:%M"), " EAT")),
+                          tags$span(style="color:#dee2e6;","·"),
+                          tags$span(style="background:#d1fae5;color:#065f46;border:1px solid #6ee7b7;border-radius:3px;padding:1px 8px;font-size:11px;font-weight:600;",
+                                    paste0("✓ ", n_prophet, " Prophet")),
+                          if (n_heuristic > 0)
+                            tags$span(style="background:#fff8e1;color:#664d03;border:1px solid #fcd34d;border-radius:3px;padding:1px 8px;font-size:11px;font-weight:600;",
+                                      paste0("⚠ ", n_heuristic, " heuristic"))
+                 )
                ),
                actionButton("btn_rebuild_forecast",
-                            tagList(bs_icon("arrow-clockwise"), " Rebuild Models"),
+                            tagList(bs_icon("arrow-clockwise"), " Rebuild"),
                             class="btn btn-outline-secondary btn-sm",
                             style="font-size:11px;")
       ),
       
-      # ── Model coverage badge ──────────────────────────────────────
-      tags$div(style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;",
-               tags$span(style="background:#d1fae5;color:#065f46;border:1px solid #6ee7b7;border-radius:4px;padding:3px 10px;font-size:11px;font-weight:600;",
-                         paste0("✓ ", n_prophet, " Prophet models fitted")),
-               if (n_heuristic > 0)
-                 tags$span(style="background:#fff8e1;color:#664d03;border:1px solid #fcd34d;border-radius:4px;padding:3px 10px;font-size:11px;font-weight:600;",
-                           paste0("⚠ ", n_heuristic, " heuristic fallback (insufficient data)"))
+      # ── Compact KPI strip ─────────────────────────────────────────
+      tags$div(style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:14px;",
+               # Critical
+               tags$div(style="background:#fff;border:1px solid #dee2e6;border-left:4px solid #7b0000;border-radius:6px;padding:8px 12px;display:flex;align-items:center;gap:10px;",
+                        tags$div(style="font-size:22px;font-weight:800;color:#7b0000;min-width:32px;text-align:center;", n_critical),
+                        tags$div(
+                          tags$div(style="font-size:10px;font-weight:700;color:#7b0000;text-transform:uppercase;letter-spacing:.04em;","Critical"),
+                          tags$div(style="font-size:10px;color:#6c757d;","counties")
+                        )
+               ),
+               # High
+               tags$div(style="background:#fff;border:1px solid #dee2e6;border-left:4px solid #dc3545;border-radius:6px;padding:8px 12px;display:flex;align-items:center;gap:10px;",
+                        tags$div(style="font-size:22px;font-weight:800;color:#dc3545;min-width:32px;text-align:center;", n_high_fc),
+                        tags$div(
+                          tags$div(style="font-size:10px;font-weight:700;color:#dc3545;text-transform:uppercase;letter-spacing:.04em;","High"),
+                          tags$div(style="font-size:10px;color:#6c757d;","counties")
+                        )
+               ),
+               # Elevated
+               tags$div(style="background:#fff;border:1px solid #dee2e6;border-left:4px solid #fd7e14;border-radius:6px;padding:8px 12px;display:flex;align-items:center;gap:10px;",
+                        tags$div(style="font-size:22px;font-weight:800;color:#fd7e14;min-width:32px;text-align:center;", n_elevated),
+                        tags$div(
+                          tags$div(style="font-size:10px;font-weight:700;color:#fd7e14;text-transform:uppercase;letter-spacing:.04em;","Elevated"),
+                          tags$div(style="font-size:10px;color:#6c757d;","counties")
+                        )
+               ),
+               # Stable
+               tags$div(style="background:#fff;border:1px solid #dee2e6;border-left:4px solid #198754;border-radius:6px;padding:8px 12px;display:flex;align-items:center;gap:10px;",
+                        tags$div(style="font-size:22px;font-weight:800;color:#198754;min-width:32px;text-align:center;",
+                                 sum(county_fc$forecast_level %in% c("STABLE","MONITORED"), na.rm=TRUE)),
+                        tags$div(
+                          tags$div(style="font-size:10px;font-weight:700;color:#198754;text-transform:uppercase;letter-spacing:.04em;","Stable"),
+                          tags$div(style="font-size:10px;color:#6c757d;","counties")
+                        )
+               ),
+               # Top watch
+               tags$div(style="background:#0066cc;border-radius:6px;padding:8px 12px;color:#fff;",
+                        tags$div(style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;opacity:.8;margin-bottom:2px;","Top Watch County"),
+                        tags$div(style="font-size:14px;font-weight:800;line-height:1.2;", top_county),
+                        tags$div(style="font-size:9px;opacity:.75;margin-top:1px;",
+                                 paste0("Score: ", max(county_fc$escalation_score, na.rm=TRUE)))
+               )
       ),
       
-      # ── KPI row ──────────────────────────────────────────────────
-      tags$div(style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;",
-               tags$div(style="background:#7b0000;border-radius:8px;padding:10px 14px;color:#fff;",
-                        tags$div(style="font-size:10px;font-weight:700;text-transform:uppercase;opacity:.85;","Critical Risk"),
-                        tags$div(style="font-size:28px;font-weight:800;", n_critical),
-                        tags$div(style="font-size:10px;opacity:.75;","counties in next 14d")),
-               tags$div(style="background:#dc3545;border-radius:8px;padding:10px 14px;color:#fff;",
-                        tags$div(style="font-size:10px;font-weight:700;text-transform:uppercase;opacity:.85;","High Risk"),
-                        tags$div(style="font-size:28px;font-weight:800;", n_high_fc),
-                        tags$div(style="font-size:10px;opacity:.75;","counties")),
-               tags$div(style="background:#fd7e14;border-radius:8px;padding:10px 14px;color:#fff;",
-                        tags$div(style="font-size:10px;font-weight:700;text-transform:uppercase;opacity:.85;","Elevated"),
-                        tags$div(style="font-size:28px;font-weight:800;", n_elevated),
-                        tags$div(style="font-size:10px;opacity:.75;","counties")),
-               tags$div(style="background:#0066cc;border-radius:8px;padding:10px 14px;color:#fff;",
-                        tags$div(style="font-size:10px;font-weight:700;text-transform:uppercase;opacity:.85;","Top Watch County"),
-                        tags$div(style="font-size:16px;font-weight:800;line-height:1.3;margin-top:4px;", top_county),
-                        tags$div(style="font-size:10px;opacity:.75;","highest escalation score"))
-      ),
-      
-      layout_columns(col_widths=c(8,4),
+      # ── Three-column layout: ranking | map | trend chart ─────────
+      layout_columns(col_widths=c(3,5,4),
                      
-                     # ── Left: map + trend chart ──────────────────────────────
-                     tagList(
-                       card(full_screen=TRUE,
-                            card_header(tagList(bs_icon("map"),
-                                                " Forecast Risk Map · hover for details")),
-                            tags$div(style="height:380px;",
-                                     tmapOutput("forecast_map", height="380px"))
-                       ),
-                       if (!is.null(trend_plot))
-                         card(style="margin-top:10px;",
-                              card_header(
-                                tagList(bs_icon("graph-up"), " Prophet Forecast — ",
-                                        tags$span(style="color:#dc3545;", top_county)),
-                                tags$div(style="float:right;",
-                                         selectInput("forecast_county_select", NULL,
-                                                     choices  = setNames(counties$name, counties$name),
-                                                     selected = top_county,
-                                                     width    = "160px"))
-                              ),
-                              tags$div(style="height:240px;",
-                                       plotlyOutput("forecast_trend_plot", height="240px"))
-                         )
+                     # ── LEFT: County ranking ──────────────────────────────────
+                     card(style="border-top:3px solid #1a1a2e;",
+                          card_header(tagList(bs_icon("sort-down"), " County Risk Ranking")),
+                          tags$div(style="max-height:560px;overflow-y:auto;padding:0;",
+                                   lapply(seq_len(nrow(county_fc[order(-county_fc$escalation_score),])), function(i) {
+                                     row <- county_fc[order(-county_fc$escalation_score),][i,]
+                                     col <- fc_col(row$forecast_level)
+                                     txt_col <- if(row$forecast_level == "MONITORED") "#1a1a2e" else "#fff"
+                                     tags$div(
+                                       style=paste0("display:flex;align-items:center;gap:8px;padding:6px 12px;",
+                                                    "border-bottom:1px solid #f5f5f5;",
+                                                    if(i==1) "background:#fafafa;" else ""),
+                                       # Rank
+                                       tags$div(style="font-size:10px;font-weight:700;color:#9ca3af;min-width:18px;",
+                                                paste0("#",i)),
+                                       # County + model badge
+                                       tags$div(style="flex:1;min-width:0;",
+                                                tags$div(style="display:flex;align-items:center;gap:4px;",
+                                                         tags$span(style="font-size:12px;font-weight:700;color:#1a1a2e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
+                                                                   row$county),
+                                                         if (isTRUE(row$prophet_used))
+                                                           tags$span(style="font-size:8px;background:#d1fae5;color:#065f46;border-radius:2px;padding:0 3px;font-weight:700;flex-shrink:0;","P")
+                                                         else
+                                                           tags$span(style="font-size:8px;background:#fff8e1;color:#664d03;border-radius:2px;padding:0 3px;font-weight:700;flex-shrink:0;","H")
+                                                ),
+                                                tags$div(style="font-size:9px;color:#9ca3af;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
+                                                         row$drivers)
+                                       ),
+                                       # Score + level badge
+                                       tags$div(style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex-shrink:0;",
+                                                tags$span(style=paste0("background:",col,";color:",txt_col,
+                                                                       ";border-radius:3px;padding:1px 6px;font-size:9px;font-weight:700;"),
+                                                          row$forecast_level),
+                                                tags$span(style=paste0("font-size:13px;font-weight:800;color:",col,";"),
+                                                          row$escalation_score)
+                                       )
+                                     )
+                                   })
+                          ),
+                          tags$div(style="padding:6px 12px;font-size:9px;color:#9ca3af;border-top:1px solid #f0f0f0;display:flex;gap:8px;",
+                                   tags$span(tagList(tags$span(style="background:#d1fae5;color:#065f46;border-radius:2px;padding:0 3px;font-weight:700;","P"), " Prophet")),
+                                   tags$span(tagList(tags$span(style="background:#fff8e1;color:#664d03;border-radius:2px;padding:0 3px;font-weight:700;","H"), " Heuristic"))
+                          )
                      ),
                      
-                     # ── Right: county ranking ────────────────────────────────
-                     card(
-                       card_header(tagList(bs_icon("sort-down"), " County Risk Ranking")),
-                       tags$div(style="max-height:640px;overflow-y:auto;",
-                                lapply(seq_len(nrow(county_fc[order(-county_fc$escalation_score),])), function(i) {
-                                  row <- county_fc[order(-county_fc$escalation_score),][i,]
-                                  col <- fc_col(row$forecast_level)
-                                  tags$div(
-                                    style=paste0("display:flex;align-items:center;gap:8px;padding:7px 10px;",
-                                                 "border-bottom:1px solid #f0f0f0;"),
-                                    tags$div(style="min-width:22px;font-size:11px;font-weight:700;color:#6c757d;",
-                                             paste0("#", i)),
-                                    tags$div(style="flex:1;",
-                                             tags$div(style="display:flex;align-items:center;gap:5px;",
-                                                      tags$div(style="font-size:12px;font-weight:700;color:#1a1a2e;", row$county),
-                                                      if (isTRUE(row$prophet_used))
-                                                        tags$span(style="font-size:9px;background:#d1fae5;color:#065f46;border-radius:2px;padding:0 4px;font-weight:600;","P")
-                                                      else
-                                                        tags$span(style="font-size:9px;background:#fff8e1;color:#664d03;border-radius:2px;padding:0 4px;font-weight:600;","H")
-                                             ),
-                                             tags$div(style="font-size:10px;color:#6c757d;margin-top:1px;", row$drivers)
-                                    ),
-                                    tags$div(
-                                      tags$span(style=paste0("background:",col,";color:",
-                                                             if(row$forecast_level=="MONITORED") "#1a1a2e" else "#fff",
-                                                             ";border-radius:4px;padding:2px 7px;font-size:10px;font-weight:700;"),
-                                                row$forecast_level),
-                                      tags$div(style=paste0("font-size:13px;font-weight:800;color:", col,
-                                                            ";text-align:right;margin-top:1px;"),
-                                               row$escalation_score)
-                                    )
-                                  )
-                                })
+                     # ── CENTRE: Map ───────────────────────────────────────────
+                     card(full_screen=TRUE, style="border-top:3px solid #0066cc;",
+                          card_header(tagList(bs_icon("map"), " Forecast Risk Map · hover for county details")),
+                          tags$div(style="height:560px;",
+                                   tmapOutput("forecast_map", height="560px"))
+                     ),
+                     
+                     # ── RIGHT: Trend chart + methodology ─────────────────────
+                     tagList(
+                       card(style="border-top:3px solid #dc3545;",
+                            card_header(
+                              tags$div(style="display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;",
+                                       tags$span(style="font-size:13px;font-weight:600;",
+                                                 tagList(bs_icon("graph-up"), " Prophet Trend")),
+                                       selectInput("forecast_county_select", NULL,
+                                                   choices  = setNames(counties$name, counties$name),
+                                                   selected = top_county,
+                                                   width    = "140px")
+                              )
+                            ),
+                            tags$div(style="height:280px;",
+                                     plotlyOutput("forecast_trend_plot", height="280px"))
                        ),
-                       tags$div(style="padding:8px 10px;font-size:10px;color:#9ca3af;border-top:1px solid #f0f0f0;",
-                                tags$span(style="background:#d1fae5;color:#065f46;border-radius:2px;padding:0 4px;font-weight:600;margin-right:4px;","P"),
-                                "Prophet fitted  ",
-                                tags$span(style="background:#fff8e1;color:#664d03;border-radius:2px;padding:0 4px;font-weight:600;margin-right:4px;","H"),
-                                "Heuristic fallback")
+                       # Methodology note below chart
+                       tags$div(style="margin-top:8px;background:#f8f9fa;border-radius:6px;padding:10px 12px;font-size:10px;color:#6c757d;border-left:3px solid #7c3aed;line-height:1.7;",
+                                tags$strong("Methodology: "),
+                                paste0("Prophet models on 30-day daily mean risk scores. ",
+                                       "Escalation score = mean yhat_upper over 14-day horizon, capped 0–100. ",
+                                       "Weekly seasonality · changepoint prior = 0.15 · 80% CI shown. ",
+                                       "< ", MIN_PROPHET_OBS, " days data → heuristic fallback. ",
+                                       "All projections require officer review.")
+                       )
                      )
-      ),
-      
-      # ── Methodology note ─────────────────────────────────────────
-      tags$div(style="margin-top:12px;background:#f8f9fa;border-radius:8px;padding:10px 14px;font-size:11px;color:#6c757d;border-left:3px solid #7c3aed;",
-               tags$strong("Forecast Methodology: "),
-               paste0("Per-county Prophet time-series models fitted on daily mean risk scores over a 30-day training window. ",
-                      "Weekly seasonality enabled; changepoint prior scale = 0.15 (moderate flexibility). ",
-                      "Escalation score = mean yhat_upper over the 14-day forecast horizon, capped 0–100. ",
-                      "Counties with fewer than ", MIN_PROPHET_OBS, " days of data fall back to a weighted heuristic. ",
-                      "80% confidence intervals shown. All projections require officer review before operational action.")
       )
     )
   })

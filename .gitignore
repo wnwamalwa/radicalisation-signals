@@ -16,3 +16,5 @@ cache/
 *.sqlite
 .Renviron
 *.xlsx
+cache/yt_video_cache.rds
+cache/yt_pulled_videos.rds

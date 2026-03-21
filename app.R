@@ -978,6 +978,14 @@ build_cases <- function() {
     message(sprintf("[db] Seeded %d cases", nrow(all_cases)))
   } else {
     all_cases <- db_cases
+    # Backfill risk_level for any cases where it is missing or empty
+    # (happens when cases were saved before bulk classify ran)
+    missing_rl <- is.na(all_cases$risk_level) | nchar(trimws(all_cases$risk_level %||% "")) == 0
+    if (any(missing_rl)) {
+      all_cases$risk_level[missing_rl] <- with(all_cases[missing_rl, ],
+        ifelse(risk_score >= 65, "HIGH", ifelse(risk_score >= 35, "MEDIUM", "LOW")))
+      message(sprintf("[db] Backfilled risk_level for %d case(s)", sum(missing_rl)))
+    }
     message(sprintf("[db] Loaded %d cases from DB", nrow(all_cases)))
   }
 }
@@ -1902,7 +1910,15 @@ ui <- page_navbar(
       class="live-badge ms-2",
       style="font-size:10px;",
       tags$span(class="live-dot"), "LIVE"
-    )
+    ),
+    # Email config indicator — visible from every tab
+    if (all(nchar(Sys.getenv(c("GMAIL_USER","GMAIL_PASS","OFFICER_EMAIL"))) > 0))
+      tags$span(style="font-size:10px;color:rgba(255,255,255,0.6);margin-left:8px;",
+                "📧 alerts on")
+    else
+      tags$span(style="font-size:10px;color:#ffc107;font-weight:600;margin-left:8px;",
+                title="Set GMAIL_USER, GMAIL_PASS, OFFICER_EMAIL in secrets/.Renviron to enable email alerts",
+                "⚠ email off")
   ),
   theme=ews_theme, fillable=TRUE, id="main_nav",
   
@@ -4766,21 +4782,44 @@ server <- function(input, output, session) {
   # ── Forecast ───────────────────────────────────────────────────
   output$forecast_ui <- renderUI({
     if (!rv$authenticated) return(auth_wall_ui(rv$timed_out))
-    
+
     now <- Sys.time()
-    
+
     # ── Build / use cached forecasts ──────────────────────────────
-    # Rebuild if cache is empty or older than 30 minutes
     needs_rebuild <- is.null(rv$forecast_cache) ||
       is.null(rv$forecast_built) ||
       as.numeric(difftime(now, rv$forecast_built, units="mins")) > 30
-    
+
     if (needs_rebuild) {
-      withProgress(message="Fitting Prophet models…", value=0.1, {
-        rv$forecast_cache <- build_county_forecasts(rv$cases, now)
-        rv$forecast_built <- now
-        setProgress(1)
+      # Show a rich loading screen immediately while models fit
+      isolate({
+        shinyjs::runjs("document.getElementById('ews-loading-bar').classList.add('active');")
+        withProgress(message="Fitting Prophet models…", value=0, {
+          n_counties <- nrow(counties)
+          setProgress(0.05, detail=sprintf("Preparing %d county datasets…", n_counties))
+          rv$forecast_cache <- build_county_forecasts(rv$cases, now)
+          rv$forecast_built <- now
+          n_p <- sum(sapply(rv$forecast_cache, `[[`, "prophet_used"), na.rm=TRUE)
+          setProgress(1, detail=sprintf("%d Prophet · %d heuristic", n_p, n_counties - n_p))
+        })
+        shinyjs::runjs("document.getElementById('ews-loading-bar').classList.remove('active');")
       })
+
+      # Return loading placeholder — Shiny will re-render once progress completes
+      return(
+        tags$div(style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:420px;gap:16px;",
+          tags$div(style="width:48px;height:48px;border:4px solid #dee2e6;border-top:4px solid #0066cc;border-radius:50%;animation:spin 1s linear infinite;"),
+          tags$div(style="text-align:center;",
+            tags$div(style="font-size:15px;font-weight:700;color:#1a1a2e;margin-bottom:6px;",
+                     "Fitting Prophet Models"),
+            tags$div(style="font-size:12px;color:#6c757d;",
+                     paste0("Running time-series analysis across all 47 counties…")),
+            tags$div(style="font-size:11px;color:#9ca3af;margin-top:4px;",
+                     "This takes 30–60 seconds on first load · cached for 30 minutes")
+          ),
+          tags$style("@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}")
+        )
+      )
     }
     
     fc_list    <- rv$forecast_cache

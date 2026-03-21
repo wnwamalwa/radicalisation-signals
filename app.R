@@ -2323,14 +2323,142 @@ ui <- page_navbar(
                                                   )
                                    ),
                                    tags$div(style="margin-top:16px;background:#f8f9fa;border-radius:8px;padding:14px;",
-                                            tags$div(style="font-size:11px;font-weight:800;color:#0066cc;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;","Risk Formula"),
-                                            tags$div(style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#1a1a2e;background:#fff;padding:10px 14px;border-radius:6px;border:1px solid #dee2e6;",
-                                                     "Risk = 0.55 × composite + 0.45 × NCIC_base"),
-                                            tags$div(style="font-size:11px;color:#6c757d;margin-top:6px;",
-                                                     "where composite = 0.30×confidence + 0.22×keyword_weight + 0.13×network_score + 0.08×freq_spike + 0.12×context_score + 0.15×source_history"),
-                                            tags$p(style="font-size:12px;color:#6c757d;margin-top:8px;margin-bottom:0;",
-                                                   "Source history (capped +30) reflects handle/county posting patterns over 30 days. ",
-                                                   "Risk scores are relative within this dataset — not comparable to external threat indices.")
+                                            
+                                            # ── Formula header ─────────────────────────────
+                                            tags$div(style="font-size:11px;font-weight:800;color:#0066cc;text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;","Risk Score Formula"),
+                                            
+                                            # ── Master formula ─────────────────────────────
+                                            tags$div(style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#1a1a2e;background:#fff;padding:10px 14px;border-radius:6px;border:1px solid #dee2e6;margin-bottom:10px;",
+                                                     tags$div("Risk = 0.55 × composite + 0.45 × NCIC_base"),
+                                                     tags$div(style="color:#6c757d;font-size:10px;margin-top:4px;",
+                                                              "composite = 0.30×conf + 0.22×kw + 0.13×net + 0.08×spike + 0.12×ctx + 0.15×src_hist")
+                                            ),
+                                            
+                                            # ── Weight explanation table ────────────────────
+                                            tags$div(style="font-size:11px;font-weight:700;color:#374151;margin-bottom:6px;","Component Weights Explained"),
+                                            tags$table(style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:14px;",
+                                                       tags$thead(
+                                                         tags$tr(style="background:#e9ecef;",
+                                                                 tags$th(style="padding:5px 8px;text-align:left;font-weight:700;","Component"),
+                                                                 tags$th(style="padding:5px 8px;text-align:center;font-weight:700;","Weight"),
+                                                                 tags$th(style="padding:5px 8px;text-align:left;font-weight:700;","What it measures")
+                                                         )
+                                                       ),
+                                                       tags$tbody(
+                                                         tags$tr(style="border-bottom:1px solid #f0f0f0;",
+                                                                 tags$td(style="padding:5px 8px;font-family:'IBM Plex Mono';color:#0066cc;","conf"),
+                                                                 tags$td(style="padding:5px 8px;text-align:center;font-weight:700;","30%"),
+                                                                 tags$td(style="padding:5px 8px;color:#374151;","GPT-4o-mini self-reported certainty (0–100). Largest single driver.")
+                                                         ),
+                                                         tags$tr(style="border-bottom:1px solid #f0f0f0;background:#fafafa;",
+                                                                 tags$td(style="padding:5px 8px;font-family:'IBM Plex Mono';color:#0066cc;","kw"),
+                                                                 tags$td(style="padding:5px 8px;text-align:center;font-weight:700;","22%"),
+                                                                 tags$td(style="padding:5px 8px;color:#374151;","Adaptive keyword weight score. Updates every time an officer validates a case.")
+                                                         ),
+                                                         tags$tr(style="border-bottom:1px solid #f0f0f0;",
+                                                                 tags$td(style="padding:5px 8px;font-family:'IBM Plex Mono';color:#0066cc;","net"),
+                                                                 tags$td(style="padding:5px 8px;text-align:center;font-weight:700;","13%"),
+                                                                 tags$td(style="padding:5px 8px;color:#374151;","Network exposure score — estimated reach and amplification risk.")
+                                                         ),
+                                                         tags$tr(style="border-bottom:1px solid #f0f0f0;background:#fafafa;",
+                                                                 tags$td(style="padding:5px 8px;font-family:'IBM Plex Mono';color:#0066cc;","spike"),
+                                                                 tags$td(style="padding:5px 8px;text-align:center;font-weight:700;","8%"),
+                                                                 tags$td(style="padding:5px 8px;color:#374151;","Frequency spike — unusual posting volume above the county baseline.")
+                                                         ),
+                                                         tags$tr(style="border-bottom:1px solid #f0f0f0;",
+                                                                 tags$td(style="padding:5px 8px;font-family:'IBM Plex Mono';color:#0066cc;","ctx"),
+                                                                 tags$td(style="padding:5px 8px;text-align:center;font-weight:700;","12%"),
+                                                                 tags$td(style="padding:5px 8px;color:#374151;","Contextual factors flagged by GPT (e.g. dehumanisation, mobilisation). Each factor = +8 pts.")
+                                                         ),
+                                                         tags$tr(style="border-bottom:1px solid #f0f0f0;background:#fafafa;",
+                                                                 tags$td(style="padding:5px 8px;font-family:'IBM Plex Mono';color:#0066cc;","src_hist"),
+                                                                 tags$td(style="padding:5px 8px;text-align:center;font-weight:700;","15%"),
+                                                                 tags$td(style="padding:5px 8px;color:#374151;","Source history — handle and county posting pattern over 30 days. Capped at +30.")
+                                                         ),
+                                                         tags$tr(style="background:#e8f0fe;",
+                                                                 tags$td(style="padding:5px 8px;font-family:'IBM Plex Mono';color:#0066cc;","NCIC_base"),
+                                                                 tags$td(style="padding:5px 8px;text-align:center;font-weight:700;","45%"),
+                                                                 tags$td(style="padding:5px 8px;color:#374151;","Fixed base score per NCIC level: L0=2, L1=15, L2=30, L3=55, L4=72, L5=92.")
+                                                         )
+                                                       )
+                                            ),
+                                            
+                                            # ── L0-L5 worked examples ───────────────────────
+                                            tags$div(style="font-size:11px;font-weight:700;color:#374151;margin-bottom:8px;","Worked Examples — L0 to L5"),
+                                            tags$div(style="display:flex;flex-direction:column;gap:6px;",
+                                                     
+                                                     # L0
+                                                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-left:4px solid #198754;border-radius:6px;padding:8px 12px;",
+                                                              tags$div(style="display:flex;align-items:center;gap:6px;margin-bottom:4px;",
+                                                                       tags$span(style="background:#198754;color:#fff;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:700;","L0 Neutral"),
+                                                                       tags$span(style="font-size:11px;color:#374151;font-style:italic;",'"Heshima kwa wote, hakuna kabila bora kuliko lingine"')
+                                                              ),
+                                                              tags$div(style="font-family:'IBM Plex Mono';font-size:10px;color:#6c757d;margin-bottom:3px;",
+                                                                       "L0 base(2) + 0.30×conf(95) + 0.22×kw(0) + 0.13×net(10) + 0.12×ctx(0) + 0.15×src(0) = 14"),
+                                                              tags$div(style="font-size:10px;color:#198754;","No action. Log for trend analysis. Peace message — constitutionally protected speech.")
+                                                     ),
+                                                     
+                                                     # L1
+                                                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-left:4px solid #85b800;border-radius:6px;padding:8px 12px;",
+                                                              tags$div(style="display:flex;align-items:center;gap:6px;margin-bottom:4px;",
+                                                                       tags$span(style="background:#85b800;color:#fff;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:700;","L1 Offensive"),
+                                                                       tags$span(style="font-size:11px;color:#374151;font-style:italic;",'"These politicians are useless thieves, all of them"')
+                                                              ),
+                                                              tags$div(style="font-family:'IBM Plex Mono';font-size:10px;color:#6c757d;margin-bottom:3px;",
+                                                                       "L1 base(15) + 0.30×conf(80) + 0.22×kw(10) + 0.13×net(20) + 0.12×ctx(0) + 0.15×src(0) = 22"),
+                                                              tags$div(style="font-size:10px;color:#85b800;","Monitor. Targets public officials — not a protected group. No Section 13 threshold.")
+                                                     ),
+                                                     
+                                                     # L2
+                                                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-left:4px solid #ffc107;border-radius:6px;padding:8px 12px;",
+                                                              tags$div(style="display:flex;align-items:center;gap:6px;margin-bottom:4px;",
+                                                                       tags$span(style="background:#ffc107;color:#1a1a2e;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:700;","L2 Prejudice"),
+                                                                       tags$span(style="font-size:11px;color:#374151;font-style:italic;",'"Kabila fulani hawastahili nafasi katika serikali"')
+                                                              ),
+                                                              tags$div(style="font-family:'IBM Plex Mono';font-size:10px;color:#6c757d;margin-bottom:3px;",
+                                                                       "L2 base(30) + 0.30×conf(78) + 0.22×kw(20) + 0.13×net(25) + 0.12×ctx(8) + 0.15×src(0) = 36"),
+                                                              tags$div(style="font-size:10px;color:#664d03;","Document pattern. Ethnic stereotyping — protected group targeted. Request platform review if repeated.")
+                                                     ),
+                                                     
+                                                     # L3
+                                                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-left:4px solid #fd7e14;border-radius:6px;padding:8px 12px;",
+                                                              tags$div(style="display:flex;align-items:center;gap:6px;margin-bottom:4px;",
+                                                                       tags$span(style="background:#fd7e14;color:#fff;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:700;","L3 Dehumanization"),
+                                                                       tags$span(style="font-size:11px;color:#374151;font-style:italic;",'"Watu wa kabila hiyo ni kama magonjwa — wanaharibu nchi"')
+                                                              ),
+                                                              tags$div(style="font-family:'IBM Plex Mono';font-size:10px;color:#6c757d;margin-bottom:3px;",
+                                                                       "L3 base(55) + 0.30×conf(82) + 0.22×kw(28) + 0.13×net(40) + 0.12×ctx(16) + 0.15×src(0) = 56"),
+                                                              tags$div(style="font-size:10px;color:#fd7e14;","Issue monitoring flag. Disease metaphor = dehumanisation. Initiate engagement with poster.")
+                                                     ),
+                                                     
+                                                     # L4
+                                                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-left:4px solid #dc3545;border-radius:6px;padding:8px 12px;",
+                                                              tags$div(style="display:flex;align-items:center;gap:6px;margin-bottom:4px;",
+                                                                       tags$span(style="background:#dc3545;color:#fff;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:700;","L4 Hate Speech"),
+                                                                       tags$span(style="background:#dc3545;color:#fff;border-radius:3px;padding:1px 5px;font-size:9px;font-weight:700;","⚖ S13"),
+                                                                       tags$span(style="font-size:11px;color:#374151;font-style:italic;",'"Waende kwao — hawastahili kuishi hapa Kenya yetu"')
+                                                              ),
+                                                              tags$div(style="font-family:'IBM Plex Mono';font-size:10px;color:#6c757d;margin-bottom:3px;",
+                                                                       "L4 base(72) + 0.30×conf(85) + 0.22×kw(30) + 0.13×net(60) + 0.12×ctx(16) + 0.15×src(0) = 73"),
+                                                              tags$div(style="font-size:10px;color:#dc3545;","Section 13 threshold crossed. Expulsion rhetoric directed at ethnic group. Require takedown. Alert DCI.")
+                                                     ),
+                                                     
+                                                     # L5
+                                                     tags$div(style="background:#fff;border:1px solid #dee2e6;border-left:4px solid #7b0000;border-radius:6px;padding:8px 12px;",
+                                                              tags$div(style="display:flex;align-items:center;gap:6px;margin-bottom:4px;",
+                                                                       tags$span(style="background:#7b0000;color:#fff;border-radius:3px;padding:1px 7px;font-size:10px;font-weight:700;","L5 Toxic"),
+                                                                       tags$span(style="background:#7b0000;color:#fff;border-radius:3px;padding:1px 5px;font-size:9px;font-weight:700;","⚖ S13"),
+                                                                       tags$span(style="background:#7c3aed;color:#fff;border-radius:3px;padding:1px 5px;font-size:9px;font-weight:700;","⚠ Escalate"),
+                                                                       tags$span(style="font-size:11px;color:#374151;font-style:italic;",'"Chinja wote wa kabila hiyo — tutawaonyesha nguvu kesho"')
+                                                              ),
+                                                              tags$div(style="font-family:'IBM Plex Mono';font-size:10px;color:#6c757d;margin-bottom:3px;",
+                                                                       "L5 base(92) + 0.30×conf(96) + 0.22×kw(45) + 0.13×net(80) + 0.12×ctx(24) + 0.15×src(20) = 91"),
+                                                              tags$div(style="font-size:10px;color:#7b0000;font-weight:700;","IMMEDIATE ESCALATION. Violence override triggered (chinja = slaughter). Press charges. Contact DCI now.")
+                                                     )
+                                            ),
+                                            
+                                            tags$p(style="font-size:11px;color:#9ca3af;margin-top:10px;margin-bottom:0;",
+                                                   "All scores are relative within the current 30-day dataset window. A score of 91 means this post ranks near the top of active signals — not an absolute severity measure.")
                                    )
                           )
                      ),

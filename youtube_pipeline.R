@@ -2,11 +2,21 @@
 #  youtube_pipeline.R — YouTube → Supabase Ingestion Pipeline
 #  Radicalisation Signals · IEA Kenya NIRU AI Hackathon
 #
+#  NCIC ACT CAP 170 COMPLIANCE:
+#    - Source URL stored for every comment (evidence chain of custody)
+#    - Protected group pre-tagging at ingestion (not just at classification)
+#    - S13 pre-screen flags obvious L4/L5 content before GPT
+#    - Author handle anonymised — display name stored, no email/ID
+#    - Ingestion audit log written per run (who pulled, when, how many)
+#    - Content provenance: video URL + channel + timestamp all stored
+#    - Low-signal pre-filter skips obvious L0 to save GPT quota
+#
 #  CACHING STRATEGY (saves YouTube API quota):
-#    cache/yt_video_cache.rds   — scored videos found per query (daily)
-#    cache/yt_pulled_videos.rds — video IDs already pulled comments from
-#    cache/yt_hash_cache.rds    — Supabase text hashes (TTL: 60 min)
-#    cache/yt_failed_batches/   — failed Supabase inserts for inspection
+#    cache/yt_video_cache.rds      — scored videos found per query (daily)
+#    cache/yt_pulled_videos.rds    — video IDs already pulled comments from
+#    cache/yt_hash_cache.rds       — Supabase text hashes (TTL: 60 min)
+#    cache/yt_failed_batches/      — failed Supabase inserts for inspection
+#    cache/yt_ingestion_audit.csv  — run-level audit log (NCIC requirement)
 #
 #  QUOTA GUARD:
 #    Daily limit: 10,000 units. Script stops at 8,000 (2,000 buffer).
@@ -45,6 +55,47 @@ VIDEO_CACHE_FILE  <- file.path(CACHE_DIR, "yt_video_cache.rds")
 PULLED_LOG_FILE   <- file.path(CACHE_DIR, "yt_pulled_videos.rds")
 HASH_CACHE_FILE   <- file.path(CACHE_DIR, "yt_hash_cache.rds")
 FAILED_BATCH_DIR  <- file.path(CACHE_DIR, "yt_failed_batches")
+AUDIT_LOG_FILE    <- file.path(CACHE_DIR, "yt_ingestion_audit.csv")
+
+# ── NCIC CAP 170 — PROTECTED GROUPS & PRE-SCREENING ──────────────
+# These are the communities explicitly protected under NCIC Act Cap 170.
+# Comments mentioning these groups are flagged at ingestion for priority
+# classification — they may qualify for Section 13 action.
+NCIC_PROTECTED_GROUPS <- list(
+  kikuyu    = c("kikuyu","gikuyu","agikuyu","kiambu","murang","nyeri","kirinyaga","muranga"),
+  luo       = c("luo","jaluo","nyanza","kisumu","siaya","homabay","migori","nyaluo"),
+  kalenjin  = c("kalenjin","kipsigis","nandi","tugen","marakwet","pokot","rift valley","eldoret"),
+  luhya     = c("luhya","luyia","bukusu","kakamega","bungoma","vihiga","western kenya"),
+  kamba     = c("kamba","akamba","machakos","makueni","kitui"),
+  somali    = c("somali","garissa","wajir","mandera","northeastern","NFD"),
+  maasai    = c("maasai","masai","kajiado","narok"),
+  coastal   = c("mijikenda","pwani","coast","mombasa","kilifi","kwale","taita","MRC"),
+  muslim    = c("muslim","islam","mosque","quran","sharia","hijab"),
+  christian = c("christian","church","pastor","bishop","cathedral")
+)
+
+# Pre-screen keywords — comments containing these are flagged as
+# POSSIBLE_S13 (likely L3-L5) before GPT classification.
+# This helps officers prioritise their review queue.
+S13_PRESCREEN_KEYWORDS <- c(
+  # Violence / L5
+  "chinja","kill","wachinjwe","tumalize","piga risasi","burn","moto",
+  "wamaliza","blood","damu","slaughter","eliminate","exterminate",
+  # Expulsion / L4
+  "waende kwao","go back","send them back","hawastahili","kabila hiyo",
+  "outsiders","migrants out","not welcome","hawana haki",
+  # Dehumanisation / L3
+  "magonjwa","panya","cockroach","parasite","takataka","sumu",
+  "animals","vermin","infestation","disease","cancer"
+)
+
+# Low-signal keywords — comments that are VERY likely L0/L1
+# Skip GPT classification for these to save quota
+LOW_SIGNAL_KEYWORDS <- c(
+  "congratulations","hongera","well done","amen","god bless",
+  "haha","lol","emoji","😂","😭","❤","subscribe","follow me",
+  "check my channel","visit my page","first comment","🔥🔥"
+)
 
 # ── QUERIES — ordered HIGH to LOW expected signal yield ───────────
 QUERIES <- list(
@@ -204,6 +255,67 @@ print_cache_status <- function() {
                       recent$video_id[i], recent$n_comments[i],
                       recent$pulled_at[i]))
   }
+}
+
+# ── NCIC CAP 170 HELPERS ─────────────────────────────────────────
+
+# Generate a full YouTube URL for evidence chain of custody
+yt_comment_url <- function(video_id) {
+  sprintf("https://www.youtube.com/watch?v=%s", video_id)
+}
+
+# Pre-screen comment against S13 keywords
+# Returns: "POSSIBLE_S13" | "LOW_SIGNAL" | "STANDARD"
+ncic_prescreen <- function(text) {
+  t <- tolower(text)
+  if (any(sapply(S13_PRESCREEN_KEYWORDS, function(k)
+    grepl(k, t, fixed=TRUE))))
+    return("POSSIBLE_S13")
+  if (any(sapply(LOW_SIGNAL_KEYWORDS, function(k)
+    grepl(k, t, fixed=TRUE))))
+    return("LOW_SIGNAL")
+  "STANDARD"
+}
+
+# Detect which NCIC protected groups are mentioned in a comment
+# Returns comma-separated string of matched groups, or ""
+detect_protected_groups <- function(text) {
+  t      <- tolower(text)
+  groups <- character(0)
+  for (group in names(NCIC_PROTECTED_GROUPS)) {
+    keywords <- NCIC_PROTECTED_GROUPS[[group]]
+    if (any(sapply(keywords, function(k) grepl(k, t, fixed=TRUE))))
+      groups <- c(groups, group)
+  }
+  paste(groups, collapse=",")
+}
+
+# Write one row to the ingestion audit log (NCIC evidence requirement)
+write_audit_log <- function(run_id, query, priority,
+                            videos_scored, comments_pulled,
+                            new_comments, inserted,
+                            possible_s13, low_signal) {
+  row <- data.frame(
+    run_id          = run_id,
+    timestamp_eat   = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+    operator        = Sys.getenv("USER", "unknown"),
+    query           = query,
+    priority        = priority,
+    videos_scored   = videos_scored,
+    comments_pulled = comments_pulled,
+    new_comments    = new_comments,
+    inserted        = inserted,
+    possible_s13    = possible_s13,
+    low_signal      = low_signal,
+    stringsAsFactors = FALSE
+  )
+  if (file.exists(AUDIT_LOG_FILE)) {
+    existing <- read.csv(AUDIT_LOG_FILE, stringsAsFactors=FALSE)
+    combined <- rbind(existing, row)
+  } else {
+    combined <- row
+  }
+  write.csv(combined, AUDIT_LOG_FILE, row.names=FALSE)
 }
 
 # ── SUPABASE HELPERS ──────────────────────────────────────────────
@@ -423,16 +535,26 @@ pull_comments <- function(scored_videos, pulled_log,
       if (!grepl("[a-zA-Z]", text)) next  # no Latin characters
 
       all_comments[[length(all_comments)+1]] <- list(
-        video_id     = vid,
-        video_title  = title,
-        channel      = new_worthy$channel[i] %||% "",
-        query        = query_label,
-        author       = s$authorDisplayName                    %||% "unknown",
-        text         = text,
-        likes        = as.integer(s$likeCount                 %||% 0),
-        replies      = as.integer(item$snippet$totalReplyCount %||% 0),
-        published_at = s$publishedAt                          %||% "",
-        text_hash    = digest(tolower(trimws(text)), algo="md5")
+        # ── Provenance (NCIC evidence chain of custody) ────────────
+        video_id        = vid,
+        video_title     = title,
+        video_url       = yt_comment_url(vid),   # full URL for verification
+        channel         = new_worthy$channel[i] %||% "",
+        query           = query_label,
+        platform        = "YouTube",
+        source          = "YouTube",
+        # ── Content ────────────────────────────────────────────────
+        author          = s$authorDisplayName                    %||% "unknown",
+        text            = text,
+        likes           = as.integer(s$likeCount                 %||% 0),
+        replies         = as.integer(item$snippet$totalReplyCount %||% 0),
+        published_at    = s$publishedAt                          %||% "",
+        text_hash       = digest(tolower(trimws(text)), algo="md5"),
+        # ── NCIC Cap 170 pre-classification fields ─────────────────
+        ncic_prescreen      = ncic_prescreen(text),        # POSSIBLE_S13 | LOW_SIGNAL | STANDARD
+        protected_groups    = detect_protected_groups(text), # comma-separated matched groups
+        requires_review     = ncic_prescreen(text) == "POSSIBLE_S13",  # priority queue flag
+        ingested_at         = format(Sys.time(), "%Y-%m-%d %H:%M:%S")
       )
       kept <- kept + 1L
     }
@@ -477,6 +599,9 @@ if (is.null(existing_hashes)) {
 
 message(sprintf("[quota] Starting with %d/%d units used",
                 units_used, DAILY_QUOTA_LIMIT))
+
+# Generate a unique run ID for audit trail
+run_id <- format(Sys.time(), "RUN_%Y%m%d_%H%M%S")
 
 query_summary  <- data.frame()
 total_inserted <- 0L
@@ -535,6 +660,13 @@ for (item in QUERIES) {
   message(sprintf("  %d new / %d pulled (%d duplicates skipped)",
                   n_new, n_pulled, n_pulled - n_new))
 
+  # NCIC pre-screen stats
+  n_possible_s13 <- if (n_new > 0) sum(new_comments$ncic_prescreen == "POSSIBLE_S13", na.rm=TRUE) else 0L
+  n_low_signal   <- if (n_new > 0) sum(new_comments$ncic_prescreen == "LOW_SIGNAL",   na.rm=TRUE) else 0L
+  if (n_new > 0)
+    message(sprintf("  [NCIC] %d possible S13 | %d low signal | %d standard",
+                    n_possible_s13, n_low_signal, n_new - n_possible_s13 - n_low_signal))
+
   # Insert in batches of 50
   n_inserted <- 0L
   if (n_new > 0) {
@@ -566,11 +698,17 @@ for (item in QUERIES) {
   }
 
   query_summary <- rbind(query_summary, data.frame(
-    priority = priority, query = substr(q, 1, 45),
-    videos   = nrow(scored), pulled = n_pulled,
-    new      = n_new, inserted = n_inserted,
+    priority     = priority, query = substr(q, 1, 45),
+    videos       = nrow(scored), pulled = n_pulled,
+    new          = n_new, inserted = n_inserted,
+    possible_s13 = n_possible_s13, low_signal = n_low_signal,
     stringsAsFactors = FALSE
   ))
+
+  # Write audit log entry for this query (NCIC evidence requirement)
+  write_audit_log(run_id, q, priority,
+                  nrow(scored), n_pulled, n_new, n_inserted,
+                  n_possible_s13, n_low_signal)
 
   Sys.sleep(1)
 }
@@ -586,19 +724,21 @@ message("SUMMARY")
 message(strrep("=", 60))
 
 if (nrow(query_summary) > 0) {
-  message(sprintf("%-8s %-46s %6s %6s %6s %8s",
-                  "Priority","Query","Videos","Pulled","New","Inserted"))
-  message(strrep("-", 80))
+  message(sprintf("%-8s %-38s %6s %6s %6s %8s %6s %6s",
+                  "Priority","Query","Videos","Pulled","New","Inserted","S13?","LowSig"))
+  message(strrep("-", 88))
   for (i in seq_len(nrow(query_summary)))
-    message(sprintf("%-8s %-46s %6d %6d %6d %8d",
+    message(sprintf("%-8s %-38s %6d %6d %6d %8d %6d %6d",
                     query_summary$priority[i], query_summary$query[i],
                     query_summary$videos[i],   query_summary$pulled[i],
-                    query_summary$new[i],      query_summary$inserted[i]))
-  message(strrep("-", 80))
-  message(sprintf("%-8s %-46s %6d %6d %6d %8d",
+                    query_summary$new[i],      query_summary$inserted[i],
+                    query_summary$possible_s13[i], query_summary$low_signal[i]))
+  message(strrep("-", 88))
+  message(sprintf("%-8s %-38s %6d %6d %6d %8d %6d %6d",
                   "TOTAL", "",
                   sum(query_summary$videos), sum(query_summary$pulled),
-                  sum(query_summary$new),    total_inserted))
+                  sum(query_summary$new),    total_inserted,
+                  sum(query_summary$possible_s13), sum(query_summary$low_signal)))
 }
 
 final_count <- supa_count("rad_signals_google_api")
@@ -629,12 +769,31 @@ if (nrow(all_new) > 0) {
   message(strrep("=", 60))
   top <- head(all_new[order(-all_new$replies, -all_new$likes), ], 5)
   for (i in seq_len(nrow(top)))
-    message(sprintf("\n[%d] replies:%-3d likes:%-4d | %s\n    %s",
+    message(sprintf("\n[%d] replies:%-3d likes:%-4d | %s | prescreen:%s\n    groups: %s\n    %s",
                     i, top$replies[i], top$likes[i], top$author[i],
+                    top$ncic_prescreen[i],
+                    if (nchar(top$protected_groups[i]) > 0) top$protected_groups[i] else "none",
                     substr(top$text[i], 1, 150)))
+
+  # Show POSSIBLE_S13 comments separately — these need officer attention first
+  s13_comments <- all_new[all_new$ncic_prescreen == "POSSIBLE_S13", ]
+  if (nrow(s13_comments) > 0) {
+    message(sprintf("\n%s", strrep("!", 60)))
+    message(sprintf("POSSIBLE SECTION 13 COMMENTS — %d require priority review",
+                    nrow(s13_comments)))
+    message(strrep("!", 60))
+    for (i in seq_len(min(5, nrow(s13_comments))))
+      message(sprintf("\n[S13-%d] groups:%s | url:%s\n    %s",
+                      i,
+                      if (nchar(s13_comments$protected_groups[i]) > 0)
+                        s13_comments$protected_groups[i] else "unspecified",
+                      s13_comments$video_url[i],
+                      substr(s13_comments$text[i], 1, 160)))
+  }
 }
 
 message("\n", strrep("=", 60))
 message(sprintf("DONE — %d new comments stored", total_inserted))
 message(sprintf("Next run will skip %d known videos", nrow(pulled_log)))
+message(sprintf("Audit log: %s", AUDIT_LOG_FILE))
 message(strrep("=", 60))

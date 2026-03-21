@@ -40,6 +40,7 @@ API_PAUSE_SECS        <- 0.5   # pause between API calls
 CACHE_DIR             <- "cache"
 VIDEO_CACHE_FILE      <- file.path(CACHE_DIR, "yt_video_cache.rds")
 PULLED_LOG_FILE       <- file.path(CACHE_DIR, "yt_pulled_videos.rds")
+HASH_CACHE_FILE       <- file.path(CACHE_DIR, "yt_hash_cache.rds")  # Supabase hash cache
 
 # ── QUERIES ───────────────────────────────────────────────────────
 QUERIES <- list(
@@ -117,8 +118,10 @@ log_pulled_video <- function(video_id, n_comments) {
 print_cache_status <- function() {
   v_cache  <- load_video_cache()
   p_log    <- load_pulled_log()
-  message(sprintf("[cache] %d videos known | %d already pulled",
-                  nrow(v_cache), nrow(p_log)))
+  h_cache  <- if (file.exists(HASH_CACHE_FILE)) readRDS(HASH_CACHE_FILE) else list(hashes=character(), saved_at="never")
+  message(sprintf("[cache] %d videos known | %d already pulled | %d hashes cached (saved: %s)",
+                  nrow(v_cache), nrow(p_log),
+                  length(h_cache$hashes), h_cache$saved_at))
   if (nrow(p_log) > 0) {
     message("[cache] Last 5 pulled videos:")
     recent <- tail(p_log[order(p_log$pulled_at), ], 5)
@@ -126,6 +129,39 @@ print_cache_status <- function() {
       message(sprintf("        %s | %d comments | %s",
                       recent$video_id[i], recent$n_comments[i], recent$pulled_at[i]))
   }
+}
+
+# ── SUPABASE HASH CACHE ───────────────────────────────────────────
+# Caches text hashes locally so we don't fetch from Supabase every run.
+# Cache is considered fresh for 1 hour — after that we re-fetch to pick
+# up any inserts made outside this script (e.g. manual inserts).
+HASH_CACHE_TTL_MINS <- 60L  # refresh hash cache after this many minutes
+
+load_hash_cache <- function() {
+  if (!file.exists(HASH_CACHE_FILE)) return(NULL)
+  cache <- readRDS(HASH_CACHE_FILE)
+  age   <- as.numeric(difftime(Sys.time(),
+                                as.POSIXct(cache$saved_at), units="mins"))
+  if (age > HASH_CACHE_TTL_MINS) {
+    message(sprintf("[hash cache] Expired (%.0f min old) — will refresh from Supabase", age))
+    return(NULL)
+  }
+  message(sprintf("[hash cache] HIT — %d hashes loaded (%.0f min old)",
+                  length(cache$hashes), age))
+  cache$hashes
+}
+
+save_hash_cache <- function(hashes) {
+  saveRDS(list(hashes=hashes, saved_at=format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+          HASH_CACHE_FILE)
+}
+
+# Add new hashes to local cache without re-fetching from Supabase
+append_hash_cache <- function(new_hashes) {
+  if (!file.exists(HASH_CACHE_FILE)) return(invisible(NULL))
+  cache    <- readRDS(HASH_CACHE_FILE)
+  combined <- unique(c(cache$hashes, new_hashes))
+  saveRDS(list(hashes=combined, saved_at=cache$saved_at), HASH_CACHE_FILE)
 }
 
 # ── SUPABASE HELPERS ──────────────────────────────────────────────
@@ -192,24 +228,24 @@ is_kenya_channel <- function(channel_name) {
 # Search YouTube and score videos.
 # If videos for this query are already cached today, skip the API call.
 score_videos <- function(query, max_videos=MAX_VIDEOS_PER_QUERY) {
-  
+
   # Check cache first — if we searched this query today, reuse results
   v_cache <- load_video_cache()
   today   <- format(Sys.Date(), "%Y-%m-%d")
-  
+
   cached_for_query <- v_cache[v_cache$query == query &
-                                v_cache$cached_at == today, ]
-  
+                               v_cache$cached_at == today, ]
+
   if (nrow(cached_for_query) > 0) {
     message(sprintf("  [cache HIT] %d videos from cache (no API call)",
                     nrow(cached_for_query)))
     return(cached_for_query)
   }
-  
+
   # Not cached — call YouTube API (costs 100 + N units)
   message("  [cache MISS] Calling YouTube search API...")
   Sys.sleep(API_PAUSE_SECS)
-  
+
   search_resp <- tryCatch(
     request("https://www.googleapis.com/youtube/v3/search") |>
       req_url_query(
@@ -227,15 +263,15 @@ score_videos <- function(query, max_videos=MAX_VIDEOS_PER_QUERY) {
       resp_body_json(),
     error = function(e) NULL
   )
-  
+
   if (is.null(search_resp) || is.null(search_resp$items)) return(data.frame())
-  
+
   items     <- Filter(function(v) !is.null(v$id$videoId), search_resp$items)
   video_ids <- sapply(items, function(v) v$id$videoId)
   if (length(video_ids) == 0) return(data.frame())
-  
+
   Sys.sleep(API_PAUSE_SECS)
-  
+
   stats_resp <- tryCatch(
     request("https://www.googleapis.com/youtube/v3/videos") |>
       req_url_query(
@@ -248,9 +284,9 @@ score_videos <- function(query, max_videos=MAX_VIDEOS_PER_QUERY) {
       resp_body_json(),
     error = function(e) NULL
   )
-  
+
   if (is.null(stats_resp) || is.null(stats_resp$items)) return(data.frame())
-  
+
   videos <- do.call(rbind, lapply(stats_resp$items, function(v) {
     data.frame(
       video_id      = v$id %||% "",
@@ -262,7 +298,7 @@ score_videos <- function(query, max_videos=MAX_VIDEOS_PER_QUERY) {
       stringsAsFactors = FALSE
     )
   }))
-  
+
   # Kenya filter
   kenya_markers <- c("kenya","nairobi","ruto","raila","uhuru","kenyans",
                      "uchaguzi","kabila","serikali","wakenya","odinga")
@@ -273,11 +309,11 @@ score_videos <- function(query, max_videos=MAX_VIDEOS_PER_QUERY) {
   })
   kenya_vids <- videos[videos$is_kenya, ]
   if (nrow(kenya_vids) == 0) kenya_vids <- videos
-  
+
   kenya_vids$signal_score <- kenya_vids$comment_count * 0.7 +
-    kenya_vids$view_count    * 0.0001
+                             kenya_vids$view_count    * 0.0001
   kenya_vids <- kenya_vids[order(-kenya_vids$signal_score), ]
-  
+
   # Save to cache for reuse today
   save_video_cache(kenya_vids, query)
   kenya_vids
@@ -288,33 +324,33 @@ pull_comments <- function(scored_videos,
                           min_comments       = MIN_COMMENTS_TO_PULL,
                           comments_per_video = COMMENTS_PER_VIDEO,
                           query_label        = "") {
-  
+
   worthy <- scored_videos[scored_videos$comment_count >= min_comments, ]
   if (nrow(worthy) == 0) return(data.frame())
-  
+
   # Skip videos already pulled
   pulled_log    <- load_pulled_log()
   already_pulled <- pulled_log$video_id
   new_worthy    <- worthy[!worthy$video_id %in% already_pulled, ]
-  
+
   n_skipped <- nrow(worthy) - nrow(new_worthy)
   if (n_skipped > 0)
     message(sprintf("  [cache] Skipping %d already-pulled video(s)", n_skipped))
-  
+
   if (nrow(new_worthy) == 0) {
     message("  [cache] All videos already pulled — nothing new")
     return(data.frame())
   }
-  
+
   message(sprintf("  Pulling from %d new video(s)", nrow(new_worthy)))
-  
+
   all_comments <- list()
-  
+
   for (i in seq_len(nrow(new_worthy))) {
     vid   <- new_worthy$video_id[i]
     title <- new_worthy$title[i]
     Sys.sleep(API_PAUSE_SECS)
-    
+
     comm_resp <- tryCatch(
       request("https://www.googleapis.com/youtube/v3/commentThreads") |>
         req_url_query(
@@ -329,22 +365,22 @@ pull_comments <- function(scored_videos,
         resp_body_json(),
       error = function(e) NULL
     )
-    
+
     if (is.null(comm_resp) || !is.null(comm_resp$error) ||
         is.null(comm_resp$items)) {
       message(sprintf("  Comments disabled: %s", substr(title, 1, 40)))
       log_pulled_video(vid, 0)   # log even if disabled — don't retry
       next
     }
-    
+
     kept <- 0
     for (item in comm_resp$items) {
       s    <- item$snippet$topLevelComment$snippet
       text <- trimws(s$textOriginal %||% "")
-      
+
       if (nchar(text) < 15)         next
       if (!grepl("[a-zA-Z]", text)) next
-      
+
       all_comments[[length(all_comments)+1]] <- list(
         video_id     = vid,
         video_title  = title,
@@ -359,15 +395,15 @@ pull_comments <- function(scored_videos,
       )
       kept <- kept + 1
     }
-    
+
     # Log this video as pulled so we never pull it again
     log_pulled_video(vid, kept)
     message(sprintf("  [%d/%d] '%s' -> %d comments",
                     i, nrow(new_worthy), substr(title, 1, 45), kept))
   }
-  
+
   if (length(all_comments) == 0) return(data.frame())
-  
+
   df <- do.call(rbind, lapply(all_comments, as.data.frame, stringsAsFactors=FALSE))
   df[order(-df$replies, -df$likes), ]
 }
@@ -381,10 +417,18 @@ message(strrep("=", 60))
 # Show cache status before starting
 print_cache_status()
 
-# Load Supabase hashes once upfront
-message("\n[supabase] Fetching existing hashes...")
-existing_hashes <- supa_get_existing_hashes("rad_signals_google_api")
-message(sprintf("[supabase] %d comments already stored", length(existing_hashes)))
+# Load hashes — from local cache if fresh, otherwise fetch from Supabase
+message("\n[supabase] Loading existing hashes...")
+existing_hashes <- load_hash_cache()
+
+if (is.null(existing_hashes)) {
+  message("[supabase] Fetching from Supabase...")
+  existing_hashes <- supa_get_existing_hashes("rad_signals_google_api")
+  save_hash_cache(existing_hashes)
+  message(sprintf("[supabase] %d hashes fetched and cached", length(existing_hashes)))
+} else {
+  message(sprintf("[supabase] Using cached hashes — no Supabase call needed"))
+}
 
 query_summary  <- data.frame()
 total_inserted <- 0L
@@ -393,15 +437,15 @@ all_new        <- data.frame()
 for (item in QUERIES) {
   q        <- item$q
   priority <- item$priority
-  
+
   message(sprintf("\n[%s] %s", priority, q))
-  
+
   scored <- tryCatch(score_videos(q),
-                     error=function(e) { message("  ERROR: ", e$message); data.frame() })
+    error=function(e) { message("  ERROR: ", e$message); data.frame() })
   if (nrow(scored) == 0) { message("  No videos found"); next }
-  
+
   comments <- tryCatch(pull_comments(scored, query_label=q),
-                       error=function(e) { message("  ERROR: ", e$message); data.frame() })
+    error=function(e) { message("  ERROR: ", e$message); data.frame() })
   if (nrow(comments) == 0) {
     query_summary <- rbind(query_summary, data.frame(
       priority=priority, query=substr(q,1,45),
@@ -409,13 +453,13 @@ for (item in QUERIES) {
       stringsAsFactors=FALSE))
     next
   }
-  
+
   # Deduplicate against Supabase
   new_comments <- comments[!comments$text_hash %in% existing_hashes, ]
   n_new        <- nrow(new_comments)
   message(sprintf("  %d new / %d total (%d duplicates skipped)",
                   n_new, nrow(comments), nrow(comments)-n_new))
-  
+
   # Insert in batches of 50
   n_inserted <- 0L
   if (n_new > 0) {
@@ -424,11 +468,12 @@ for (item in QUERIES) {
       start <- (b-1)*batch_size + 1
       end   <- min(b*batch_size, n_new)
       batch <- new_comments[start:end, ]
-      
+
       resp <- supa_insert("rad_signals_google_api", batch)
       if (resp_status(resp) %in% c(200L, 201L, 204L)) {
         n_inserted      <- n_inserted + nrow(batch)
         existing_hashes <- c(existing_hashes, batch$text_hash)
+        append_hash_cache(batch$text_hash)  # keep local cache in sync
       } else {
         message(sprintf("  Batch %d failed (status %d)", b, resp_status(resp)))
       }
@@ -438,14 +483,14 @@ for (item in QUERIES) {
     all_new        <- rbind(all_new, new_comments)
     message(sprintf("  Inserted %d comments", n_inserted))
   }
-  
+
   query_summary <- rbind(query_summary, data.frame(
     priority = priority, query = substr(q, 1, 45),
     videos   = nrow(scored), pulled = nrow(comments),
     new      = n_new, inserted = n_inserted,
     stringsAsFactors = FALSE
   ))
-  
+
   Sys.sleep(1)
 }
 
@@ -476,11 +521,13 @@ message(sprintf("Inserted this run:  %d", total_inserted))
 
 # ── CACHE STATUS AFTER RUN ────────────────────────────────────────
 message("\n[cache status after run]")
-v_cache  <- load_video_cache()
-p_log    <- load_pulled_log()
+v_cache <- load_video_cache()
+p_log   <- load_pulled_log()
+h_info  <- if (file.exists(HASH_CACHE_FILE)) readRDS(HASH_CACHE_FILE) else list(hashes=character(), saved_at="none")
 message(sprintf("  Videos known:    %d", nrow(v_cache)))
 message(sprintf("  Videos pulled:   %d", nrow(p_log)))
 message(sprintf("  Comments in DB:  %d", final_count))
+message(sprintf("  Hash cache:      %d hashes (saved: %s)", length(h_info$hashes), h_info$saved_at))
 
 # ── TOP SIGNAL PREVIEW ────────────────────────────────────────────
 if (nrow(all_new) > 0) {

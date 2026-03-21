@@ -18,3 +18,4 @@ cache/
 *.xlsx
 cache/yt_video_cache.rds
 cache/yt_pulled_videos.rds
+cache/yt_hash_cache.rds

@@ -1,8 +1,19 @@
 # ================================================================
-#  RADICALISATION SIGNALS  —  v5
+#  RADICALISATION SIGNALS  —  v6
 #  Kenya National Cohesion Intelligence Platform
 #  R Shiny + bslib | NCIC Cap 170 | GPT-4o-mini | HITL | Prophet
 # ================================================================
+#  v6 FEATURES (additions over v5):
+#   12. Precision/Recall evaluation (gold standard dataset)
+#   13. Officer context window (handle history + similar cases)
+#   14. GPT confidence calibration tracking
+#   15. Geographic signal clustering (coordinated campaign detection)
+#   16. Keyword bank version history (full changelog)
+#   17. Keyword retirement mechanism (90-day stale detection)
+#   18. Inter-officer agreement (Cohen's kappa + flagged cases)
+#   19. Structured officer reasoning (signal words, denotation, language)
+#   20. Adaptive keyword extraction from validated posts → Supabase
+#
 #  v5 FEATURES:
 #   1.  GPT-4o-mini language detection (replaces cld3)
 #          — Sheng, Kikuyu, Kalenjin, Luo glossaries injected into prompt
@@ -185,6 +196,71 @@ db_init <- function() {
     "case_id TEXT, ",
     "detail TEXT, ",
     "session_id TEXT)"))
+
+  # ── v6 tables ────────────────────────────────────────────────
+  dbExecute(con, paste0(
+    "CREATE TABLE IF NOT EXISTS gold_standard (",
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
+    "tweet_text TEXT NOT NULL, ",
+    "true_level INTEGER NOT NULL, ",
+    "labelled_by TEXT NOT NULL, ",
+    "labelled_at TEXT, ",
+    "second_label INTEGER, ",
+    "second_labelled_by TEXT, ",
+    "agreed INTEGER DEFAULT 0, ",
+    "notes TEXT DEFAULT '')"))
+
+  dbExecute(con, paste0(
+    "CREATE TABLE IF NOT EXISTS eval_runs (",
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
+    "run_at TEXT NOT NULL, ",
+    "n_total INTEGER, ",
+    "n_correct INTEGER, ",
+    "precision_score REAL, ",
+    "recall_score REAL, ",
+    "f1_score REAL, ",
+    "threshold INTEGER, ",
+    "run_by TEXT)"))
+
+  dbExecute(con, paste0(
+    "CREATE TABLE IF NOT EXISTS officer_agreement (",
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
+    "case_id TEXT NOT NULL, ",
+    "officer_a TEXT, level_a INTEGER, ",
+    "officer_b TEXT, level_b INTEGER, ",
+    "level_delta INTEGER, ",
+    "flagged INTEGER DEFAULT 0, ",
+    "adjudicated_by TEXT, ",
+    "final_level INTEGER, ",
+    "ts TEXT)"))
+
+  dbExecute(con, paste0(
+    "CREATE TABLE IF NOT EXISTS confidence_calibration (",
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
+    "conf_bucket INTEGER, ",
+    "n_total INTEGER DEFAULT 0, ",
+    "n_correct INTEGER DEFAULT 0, ",
+    "accuracy REAL, ",
+    "updated_at TEXT)"))
+
+  dbExecute(con, paste0(
+    "CREATE TABLE IF NOT EXISTS keyword_retirements (",
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
+    "keyword TEXT NOT NULL, ",
+    "tier INTEGER, category TEXT, language TEXT, ",
+    "retired_by TEXT, retired_at TEXT, ",
+    "reason TEXT, times_matched INTEGER DEFAULT 0)"))
+
+  dbExecute(con, paste0(
+    "CREATE TABLE IF NOT EXISTS keyword_changelog (",
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
+    "keyword TEXT NOT NULL, ",
+    "action TEXT NOT NULL, ",
+    "old_tier INTEGER, new_tier INTEGER, ",
+    "old_status TEXT, new_status TEXT, ",
+    "changed_by TEXT, changed_at TEXT, ",
+    "reason TEXT DEFAULT '')"))
+
   message("[db] SQLite initialised at ", DB_FILE)
 }
 
@@ -521,6 +597,299 @@ kw_weights_global <- db_load_weights() %||% DEFAULT_KEYWORD_WEIGHTS
 
 save_kw_weights <- function(w) {
   db_save_weights(w)
+}
+
+# ── v6: GOLD STANDARD & EVALUATION ───────────────────────────────
+db_add_gold <- function(tweet, true_level, officer, notes = "") {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  dbExecute(con,
+    "INSERT OR IGNORE INTO gold_standard (tweet_text,true_level,labelled_by,labelled_at,notes) VALUES (?,?,?,?,?)",
+    list(substr(tweet,1,500), as.integer(true_level), officer,
+         format(Sys.time(),"%Y-%m-%d %H:%M:%S"), notes))
+}
+
+db_load_gold <- function() {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  tryCatch(dbReadTable(con,"gold_standard"), error=function(e) data.frame())
+}
+
+db_load_eval_runs <- function() {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  tryCatch(dbGetQuery(con,"SELECT * FROM eval_runs ORDER BY run_at DESC LIMIT 20"),
+           error=function(e) data.frame())
+}
+
+run_evaluation <- function(gold_df, threshold=3L, officer="system") {
+  if (nrow(gold_df) == 0) return(NULL)
+  results <- lapply(seq_len(nrow(gold_df)), function(i) {
+    tweet      <- gold_df$tweet_text[i]
+    true_level <- as.integer(gold_df$true_level[i])
+    key        <- digest(tolower(trimws(tweet)))
+    pred_level <- if (exists(key, envir=classify_cache))
+      as.integer(classify_cache[[key]]$ncic_level %||% 0L) else 0L
+    list(true_pos=true_level>=threshold, pred_pos=pred_level>=threshold,
+         correct=true_level==pred_level)
+  })
+  tp <- sum(sapply(results, function(r) r$true_pos  &  r$pred_pos))
+  fp <- sum(sapply(results, function(r) !r$true_pos &  r$pred_pos))
+  fn <- sum(sapply(results, function(r) r$true_pos  & !r$pred_pos))
+  n  <- nrow(gold_df)
+  nc <- sum(sapply(results, `[[`, "correct"))
+  precision <- if (tp+fp>0) round(tp/(tp+fp),3) else NA_real_
+  recall    <- if (tp+fn>0) round(tp/(tp+fn),3) else NA_real_
+  f1 <- if (!is.na(precision)&&!is.na(recall)&&precision+recall>0)
+    round(2*precision*recall/(precision+recall),3) else NA_real_
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  dbExecute(con,
+    "INSERT INTO eval_runs (run_at,n_total,n_correct,precision_score,recall_score,f1_score,threshold,run_by) VALUES (?,?,?,?,?,?,?,?)",
+    list(format(Sys.time(),"%Y-%m-%d %H:%M:%S"),n,nc,precision,recall,f1,as.integer(threshold),officer))
+  list(n=n,correct=nc,precision=precision,recall=recall,f1=f1,tp=tp,fp=fp,fn=fn,threshold=threshold)
+}
+
+# ── v6: INTER-OFFICER AGREEMENT ───────────────────────────────────
+log_officer_agreement <- function(case_id, officer_a, level_a, officer_b, level_b) {
+  delta   <- abs(as.integer(level_a) - as.integer(level_b))
+  flagged <- if (delta > 1L) 1L else 0L
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  dbExecute(con,
+    "INSERT INTO officer_agreement (case_id,officer_a,level_a,officer_b,level_b,level_delta,flagged,ts) VALUES (?,?,?,?,?,?,?,?)",
+    list(case_id, officer_a, as.integer(level_a), officer_b, as.integer(level_b),
+         delta, flagged, format(Sys.time(),"%Y-%m-%d %H:%M:%S")))
+  flagged
+}
+
+compute_kappa <- function() {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  ag  <- tryCatch(dbReadTable(con,"officer_agreement"), error=function(e) data.frame())
+  if (nrow(ag)==0) return(list(kappa=NA,n=0L,flagged=0L,pct_agree=0))
+  n   <- nrow(ag)
+  po  <- sum(ag$level_a==ag$level_b)/n
+  pe_num <- sum(sapply(0:5,function(l) sum(ag$level_a==l)*sum(ag$level_b==l)))
+  pe  <- pe_num/n^2
+  kappa   <- if (pe<1) round((po-pe)/(1-pe),3) else 1.0
+  flagged <- sum(ag$flagged==1L,na.rm=TRUE)
+  list(kappa=kappa,n=n,flagged=flagged,pct_agree=round(po*100,1))
+}
+
+# ── v6: GPT CONFIDENCE CALIBRATION ────────────────────────────────
+update_calibration <- function(gpt_conf, gpt_level, officer_level) {
+  bucket  <- min(9L, as.integer(gpt_conf %/% 10))
+  correct <- as.integer(abs(as.integer(gpt_level)-as.integer(officer_level))<=1L)
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  existing <- dbGetQuery(con,"SELECT id,n_total,n_correct FROM confidence_calibration WHERE conf_bucket=?",list(bucket))
+  if (nrow(existing)==0) {
+    dbExecute(con,"INSERT INTO confidence_calibration (conf_bucket,n_total,n_correct,accuracy,updated_at) VALUES (?,?,?,?,?)",
+              list(bucket,1L,correct,round(correct,3),format(Sys.time(),"%Y-%m-%d %H:%M:%S")))
+  } else {
+    new_total <- existing$n_total[1]+1L; new_correct <- existing$n_correct[1]+correct
+    dbExecute(con,"UPDATE confidence_calibration SET n_total=?,n_correct=?,accuracy=?,updated_at=? WHERE conf_bucket=?",
+              list(new_total,new_correct,round(new_correct/new_total,3),format(Sys.time(),"%Y-%m-%d %H:%M:%S"),bucket))
+  }
+}
+
+load_calibration <- function() {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  tryCatch(dbGetQuery(con,"SELECT conf_bucket,n_total,n_correct,accuracy FROM confidence_calibration ORDER BY conf_bucket"),
+           error=function(e) data.frame())
+}
+
+# ── v6: KEYWORD RETIREMENT ────────────────────────────────────────
+fetch_stale_keywords <- function(days=90L) {
+  supa_url <- Sys.getenv("SUPABASE_URL"); supa_key <- Sys.getenv("SUPABASE_KEY")
+  if (nchar(supa_url)==0) return(data.frame())
+  tryCatch({
+    cutoff <- format(Sys.time()-as.difftime(days,units="days"),"%Y-%m-%dT%H:%M:%SZ")
+    req <- request(paste0(supa_url,"/rest/v1/keyword_bank")) |>
+      req_headers("apikey"=supa_key,"Authorization"=paste("Bearer",supa_key)) |>
+      req_url_query(select="id,keyword,tier,category,language,times_matched,last_matched_at",
+                    status="eq.approved",last_matched_at=paste0("lt.",cutoff))
+    fromJSON(resp_body_string(req_perform(req)),flatten=TRUE)
+  }, error=function(e) { message("[keyword retirement] ",e$message); data.frame() })
+}
+
+retire_keyword <- function(keyword_id, officer, reason="") {
+  supa_url <- Sys.getenv("SUPABASE_URL"); supa_key <- Sys.getenv("SUPABASE_KEY")
+  if (nchar(supa_url)==0) return(FALSE)
+  tryCatch({
+    req <- request(paste0(supa_url,"/rest/v1/keyword_bank")) |>
+      req_headers("apikey"=supa_key,"Authorization"=paste("Bearer",supa_key),
+                  "Content-Type"="application/json","Prefer"="return=minimal") |>
+      req_url_query(id=paste0("eq.",keyword_id)) |>
+      req_body_raw(toJSON(list(status="retired",retired_by=officer,
+                               retired_at=format(Sys.time(),"%Y-%m-%dT%H:%M:%SZ"),
+                               context=paste0("[RETIRED] ",reason)),auto_unbox=TRUE),
+                   type="application/json") |> req_method("PATCH")
+    req_perform(req)
+    log_keyword_change(keyword_id,"RETIRED",officer,old_status="approved",new_status="retired",reason=reason)
+    TRUE
+  }, error=function(e) { message("[retire] ",e$message); FALSE })
+}
+
+# ── v6: KEYWORD CHANGELOG ─────────────────────────────────────────
+log_keyword_change <- function(keyword, action, officer,
+                               old_tier=NA, new_tier=NA,
+                               old_status=NA, new_status=NA, reason="") {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  tryCatch(dbExecute(con,
+    "INSERT INTO keyword_changelog (keyword,action,old_tier,new_tier,old_status,new_status,changed_by,changed_at,reason) VALUES (?,?,?,?,?,?,?,?,?)",
+    list(keyword,action,
+         if(is.na(old_tier)) NULL else as.integer(old_tier),
+         if(is.na(new_tier)) NULL else as.integer(new_tier),
+         old_status%||%NULL,new_status%||%NULL,officer,
+         format(Sys.time(),"%Y-%m-%d %H:%M:%S"),reason)),
+  error=function(e) NULL)
+}
+
+load_keyword_changelog <- function(n=50L) {
+  con <- db_connect(); on.exit(dbDisconnect(con))
+  tryCatch(dbGetQuery(con,
+    "SELECT keyword,action,old_tier,new_tier,old_status,new_status,changed_by,changed_at,reason FROM keyword_changelog ORDER BY changed_at DESC LIMIT ?",
+    list(n)), error=function(e) data.frame())
+}
+
+# ── v6: GEOGRAPHIC CLUSTERING ─────────────────────────────────────
+detect_county_clusters <- function(cases_df, window_hours=24L, min_level=3L, min_counties=2L) {
+  recent <- cases_df[cases_df$ncic_level>=min_level &
+    !is.na(cases_df$timestamp) &
+    as.numeric(difftime(Sys.time(),cases_df$timestamp,units="hours"))<=window_hours,]
+  if (nrow(recent)==0) return(data.frame())
+  county_counts <- table(recent$county)
+  active <- names(county_counts[county_counts>=1])
+  if (length(active)<min_counties) return(data.frame())
+  clusters <- lapply(active, function(county) {
+    cc <- recent[recent$county==county,]
+    all_sigs <- unlist(strsplit(paste(cc$signals%||%"",collapse="|"),"\\|"))
+    all_sigs <- trimws(all_sigs[nchar(trimws(all_sigs))>0])
+    list(county=county,n_cases=nrow(cc),max_level=max(cc$ncic_level),
+         keywords=names(sort(table(all_sigs),decreasing=TRUE))[1:3])
+  })
+  all_kws <- unlist(lapply(clusters,`[[`,"keywords"))
+  shared  <- names(table(all_kws)[table(all_kws)>=min_counties])
+  df <- do.call(rbind,lapply(clusters,function(c) data.frame(
+    county=c$county,n_cases=c$n_cases,max_level=c$max_level,
+    top_keyword=paste(c$keywords[!is.na(c$keywords)],collapse=", "),
+    stringsAsFactors=FALSE)))
+  attr(df,"shared_keywords") <- shared
+  df
+}
+
+# ── v6: CONTEXT WINDOW HELPERS ────────────────────────────────────
+get_handle_history <- function(handle, current_cid, cases_df, n=5L) {
+  if (is.na(handle)||nchar(trimws(handle))==0) return(data.frame())
+  history <- cases_df[!is.na(cases_df$handle)&cases_df$handle==handle&cases_df$case_id!=current_cid,]
+  head(history[order(-history$ncic_level),],n)
+}
+
+get_similar_cases <- function(signals, current_cid, cases_df, n=3L) {
+  if (is.na(signals)||nchar(trimws(signals))==0) return(data.frame())
+  sig_terms <- trimws(strsplit(signals,"\\|")[[1]])
+  if (length(sig_terms)==0) return(data.frame())
+  other <- cases_df[cases_df$case_id!=current_cid&!is.na(cases_df$signals),]
+  if (nrow(other)==0) return(data.frame())
+  other$sim_score <- sapply(other$signals,function(s) {
+    sum(sig_terms %in% trimws(strsplit(s%||%"","\\|")[[1]]))
+  })
+  head(other[order(-other$sim_score,-other$ncic_level),][other$sim_score>0,,drop=FALSE],n)
+}
+
+# ── v6: EXTRACT KEYWORDS FROM VALIDATED POSTS ─────────────────────
+extract_and_save_keywords <- function(tweet, ncic_level, action, officer,
+                                      sig_words="", sig_denotes="",
+                                      sig_lang="", officer_reason="") {
+  if (!action %in% c("CONFIRMED","ESCALATED")) return(invisible(NULL))
+  if (as.integer(ncic_level) < 3L)             return(invisible(NULL))
+  supa_url <- Sys.getenv("SUPABASE_URL"); supa_key <- Sys.getenv("SUPABASE_KEY")
+  api_key  <- Sys.getenv("OPENAI_API_KEY")
+  if (nchar(supa_url)==0||nchar(api_key)==0) return(invisible(NULL))
+
+  existing_kws <- tryCatch({
+    req <- request(paste0(supa_url,"/rest/v1/keyword_bank")) |>
+      req_headers("apikey"=supa_key,"Authorization"=paste("Bearer",supa_key)) |>
+      req_url_query(select="keyword")
+    df <- fromJSON(resp_body_string(req_perform(req)),flatten=TRUE)
+    if (is.data.frame(df)&&nrow(df)>0) tolower(trimws(df$keyword)) else character()
+  }, error=function(e) character())
+
+  officer_context <- if (nchar(trimws(officer_reason))>0) paste0(
+    "\n\nOFFICER INPUT (ground truth):\n",
+    if(nchar(trimws(sig_words))>0)   paste0("- Signal phrases: ",sig_words,"\n")   else "",
+    if(nchar(trimws(sig_denotes))>0) paste0("- Denotes: ",sig_denotes,"\n")        else "",
+    if(nchar(trimws(sig_lang))>0)    paste0("- Language: ",sig_lang,"\n")          else "",
+    if(nchar(trimws(sig_reason))>0)  paste0("- Reasoning: ",sig_reason,"\n")       else ""
+  ) else ""
+
+  result <- tryCatch({
+    resp <- request("https://api.openai.com/v1/chat/completions") |>
+      req_headers("Authorization"=paste("Bearer",api_key),"Content-Type"="application/json") |>
+      req_body_raw(toJSON(list(model="gpt-4o-mini",temperature=0.1,max_tokens=600L,
+        messages=list(
+          list(role="system",content="You are an NCIC Kenya hate speech analyst. Extract signal keywords from a confirmed hate speech post. Return ONLY a JSON array with items: {keyword, tier (1-3), category, language, context}. If none found return []."),
+          list(role="user",content=paste0("Post confirmed L",ncic_level," by officer '",officer,"'.\n\nPost: \"",substr(tweet,1,500),"\"",officer_context,"\n\nExisting keywords (skip): ",paste(existing_kws,collapse=", ")))
+        )),auto_unbox=TRUE),type="application/json") |>
+      req_method("POST") |> req_perform()
+    raw <- fromJSON(resp_body_string(resp),flatten=TRUE)
+    parsed <- fromJSON(raw$choices[[1]]$message$content,flatten=TRUE)
+    if (is.data.frame(parsed)) parsed else data.frame()
+  }, error=function(e) { message("[keywords] GPT failed: ",e$message); data.frame() })
+
+  for (col in c("keyword","tier","category","language","context"))
+    if (!col %in% names(result)) result[[col]] <- ""
+  if (nrow(result)>0)
+    result <- result[!tolower(trimws(result$keyword))%in%existing_kws&nchar(trimws(result$keyword))>=3,]
+
+  # Also insert officer-identified phrases directly
+  if (nchar(trimws(sig_words))>0) {
+    direct_kws <- trimws(strsplit(sig_words,",")[[1]])
+    direct_kws <- direct_kws[nchar(direct_kws)>=3&!tolower(direct_kws)%in%existing_kws]
+    if (length(direct_kws)>0) {
+      tier_map <- c(CALL_TO_VIOLENCE=3L,CALL_TO_EXPEL=3L,ARMED_UPRISING=3L,
+                    DEHUMANISATION_ANIMAL=3L,DEHUMANISATION_DISEASE=3L,DEHUMANISATION_GENERAL=3L,
+                    ETHNIC_SLUR=2L,ETHNIC_STEREOTYPE=2L,EXCLUSION_RHETORIC=2L,
+                    ELECTION_TRIBAL=2L,ELECTION_FRAUD_TRIBAL=2L,SECESSIONISM=2L,
+                    RELIGIOUS_HATRED=2L,UNITY_THREAT=1L,CODED_HATE=1L,OTHER=1L)
+      cat_map  <- c(CALL_TO_VIOLENCE="INCITEMENT",CALL_TO_EXPEL="INCITEMENT",ARMED_UPRISING="INCITEMENT",
+                    DEHUMANISATION_ANIMAL="DEHUMANISATION",DEHUMANISATION_DISEASE="DEHUMANISATION",
+                    DEHUMANISATION_GENERAL="DEHUMANISATION",ETHNIC_SLUR="ETHNIC_CONTEMPT",
+                    ETHNIC_STEREOTYPE="ETHNIC_CONTEMPT",EXCLUSION_RHETORIC="ETHNIC_CONTEMPT",
+                    ELECTION_TRIBAL="ELECTION_INCITEMENT",ELECTION_FRAUD_TRIBAL="ELECTION_INCITEMENT",
+                    SECESSIONISM="SECESSIONISM",RELIGIOUS_HATRED="RELIGIOUS_HATRED",
+                    UNITY_THREAT="DIVISIVE_CONTENT",CODED_HATE="HATE_SPEECH",OTHER="HATE_SPEECH")
+      tier <- as.integer(tier_map[sig_denotes]%||%2L)
+      cat  <- as.character(cat_map[sig_denotes]%||%"HATE_SPEECH")
+      lang <- if (nchar(trimws(sig_lang))>0) sig_lang else "sw"
+      direct_df <- data.frame(keyword=tolower(direct_kws),tier=tier,category=cat,language=lang,
+        context=paste0("Officer-identified (",officer,"). Denotes: ",sig_denotes,
+                       if(nchar(trimws(sig_reason))>0) paste0(". ",sig_reason) else ""),
+        stringsAsFactors=FALSE)
+      gpt_cols <- c("keyword","tier","category","language","context")
+      result <- if (nrow(result)>0) rbind(result[,gpt_cols,drop=FALSE],direct_df) else direct_df
+      result <- result[!duplicated(tolower(result$keyword)),]
+    }
+  }
+
+  if (nrow(result)==0) return(invisible(NULL))
+
+  to_insert <- data.frame(keyword=tolower(trimws(result$keyword)),tier=as.integer(result$tier),
+    category=result$category,language=result$language,status="approved",source="officer",
+    suggested_by="gpt-4o-mini",reviewed_by=officer,
+    context=substr(result$context%||%"",1,300),times_matched=0L,stringsAsFactors=FALSE)
+
+  tryCatch({
+    req <- request(paste0(supa_url,"/rest/v1/keyword_bank")) |>
+      req_headers("apikey"=supa_key,"Authorization"=paste("Bearer",supa_key),
+                  "Content-Type"="application/json","Prefer"="return=minimal") |>
+      req_body_raw(toJSON(to_insert,auto_unbox=TRUE,na="null"),type="application/json") |>
+      req_method("POST")
+    req_perform(req)
+    for (i in seq_len(nrow(to_insert)))
+      log_keyword_change(to_insert$keyword[i],"ADDED",officer,
+                         new_tier=to_insert$tier[i],new_status="approved",reason="officer_validation")
+    message(sprintf("[keywords] %d keywords saved from L%s case",nrow(to_insert),ncic_level))
+  }, error=function(e) message("[keywords] insert failed: ",e$message))
+
+  kw_cache <- file.path("cache","tg_keyword_cache.json")
+  if (file.exists(kw_cache)) tryCatch(file.remove(kw_cache),error=function(e) NULL)
+  invisible(NULL)
 }
 
 # update keyword weights from officer validation (HITL Layer 1)
@@ -3019,6 +3388,8 @@ server <- function(input, output, session) {
     bulk_retries   = 0L,
     cache_size     = length(ls(classify_cache)),
     learning_flash = "",
+    last_eval      = NULL,
+    cluster_alert  = NULL,
     last_db_sync   = Sys.time()
   )
   
@@ -3031,6 +3402,20 @@ server <- function(input, output, session) {
   }, ignoreNULL=TRUE)
   
   timeout_timer <- reactiveTimer(60000)  # check every 60 seconds
+
+  # v6: geographic cluster detection — runs every 5 minutes
+  cluster_timer <- reactiveTimer(300000)
+  observe({
+    cluster_timer()
+    if (!isolate(rv$authenticated)) return()
+    clusters <- tryCatch(detect_county_clusters(isolate(rv$cases),24L,3L,2L),
+                         error=function(e) data.frame())
+    if (nrow(clusters)>0) {
+      shared <- attr(clusters,"shared_keywords")%||%character()
+      rv$cluster_alert <- list(counties=clusters,shared=shared,
+                               detected=format(Sys.time(),"%H:%M"))
+    } else rv$cluster_alert <- NULL
+  })
   observe({
     timeout_timer()
     if (!isolate(rv$authenticated)) return()
@@ -4489,7 +4874,53 @@ server <- function(input, output, session) {
                               tags$div(style="margin-bottom:7px;",
                                        tags$div(style="font-size:10px;color:#7c3aed;font-weight:700;margin-bottom:3px;","🧠 WHY FLAGGED:"),
                                        tagList(lapply(sigs,function(s) tags$div(class="explain-signal","🔎 ",s)))) else NULL,
-                            
+
+                            # v6: Context window — handle history + similar cases
+                            tags$details(
+                              style="margin-bottom:8px;",
+                              tags$summary(style="font-size:10px;font-weight:700;color:#0066cc;cursor:pointer;padding:4px 0;user-select:none;",
+                                           "📋 Officer Context — handle history & similar cases"),
+                              tags$div(style="margin-top:6px;",
+                                {
+                                  history <- get_handle_history(row$handle,cid,rv$cases,5L)
+                                  if (nrow(history)==0) {
+                                    tags$div(style="font-size:11px;color:#9ca3af;margin-bottom:8px;",
+                                             paste0("No prior posts from @",row$handle%||%"unknown","."))
+                                  } else {
+                                    tags$div(style="margin-bottom:8px;",
+                                      tags$div(style="font-size:10px;font-weight:700;color:#374151;margin-bottom:4px;",
+                                               paste0("Prior posts from @",row$handle," (",nrow(history)," found):")),
+                                      tagList(lapply(seq_len(nrow(history)),function(j) {
+                                        h <- history[j,]; hc <- ncic_color(h$ncic_level)
+                                        tags$div(style=paste0("display:flex;gap:6px;padding:4px 6px;border-radius:4px;background:",hc,"0d;border-left:2px solid ",hc,";margin-bottom:3px;"),
+                                          tags$div(style=paste0("font-size:10px;font-weight:700;color:",hc,";min-width:28px;"),paste0("L",h$ncic_level)),
+                                          tags$div(style="flex:1;font-size:10px;color:#374151;line-height:1.4;",
+                                                   substr(h$tweet_text,1,100),if(nchar(h$tweet_text)>100)"..."else""),
+                                          tags$div(style="font-size:9px;color:#9ca3af;white-space:nowrap;",h$timestamp_chr%||%""))
+                                      })))
+                                  }
+                                },
+                                {
+                                  similar <- get_similar_cases(row$signals,cid,rv$cases,3L)
+                                  if (nrow(similar)==0) {
+                                    tags$div(style="font-size:11px;color:#9ca3af;","No similar cases found.")
+                                  } else {
+                                    tags$div(
+                                      tags$div(style="font-size:10px;font-weight:700;color:#374151;margin-bottom:4px;","Similar flagged cases:"),
+                                      tagList(lapply(seq_len(nrow(similar)),function(j) {
+                                        s <- similar[j,]; sc <- ncic_color(s$ncic_level)
+                                        tags$div(style="display:flex;gap:6px;padding:4px 6px;border-radius:4px;background:#f8f9fa;border:0.5px solid #dee2e6;margin-bottom:3px;",
+                                          tags$div(style=paste0("font-size:10px;font-weight:700;color:",sc,";min-width:28px;"),paste0("L",s$ncic_level)),
+                                          tags$div(style="flex:1;",
+                                            tags$div(style="font-size:10px;color:#374151;",substr(s$tweet_text,1,90),if(nchar(s$tweet_text)>90)"..."else""),
+                                            tags$div(style="font-size:9px;color:#9ca3af;margin-top:1px;",
+                                                     paste0(s$action_taken%||%"pending"," · ",s$county%||%""))))
+                                      })))
+                                  }
+                                }
+                              )
+                            ),
+
                             # NCIC level override
                             tags$div(style="margin-bottom:7px;",
                                      tags$div(style="font-size:10px;color:#374151;font-weight:600;margin-bottom:3px;",
@@ -4499,18 +4930,61 @@ server <- function(input, output, session) {
                                                            setNames(as.character(0:5),
                                                                     paste0("Override → L",0:5," ",NCIC_LEVELS))),
                                                  selected="")),
-                            
+
                             # Note — value restored from rv$notes
                             textAreaInput(paste0("note_",cid),"Officer note",value=cur_note,
                                           placeholder="Justification, context, or instructions…",rows=2,width="100%"),
-                            
-                            # Buttons
-                            tags$div(style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap;",
-                                     actionButton(paste0("confirm_",cid), "✓ Confirm",    class="btn-val-confirm"),
-                                     actionButton(paste0("escalate_",cid),"⬆ Escalate",   class="btn-val-escalate"),
-                                     actionButton(paste0("dgrade_",cid),  "↓ Downgrade",  class="btn-val-downgrade"),
-                                     actionButton(paste0("clear_",cid),   "✓ Clear",      class="btn-val-clear"),
-                                     if(email_ok) actionButton(paste0("email_",cid),"📧 Alert",class="btn-val-email") else NULL
+
+                            # v6: Structured decision panel
+                            tags$div(
+                              style="border:1px solid #e5e7eb;border-radius:8px;padding:10px;margin-top:8px;background:#fafafa;",
+                              tags$div(style="font-size:10px;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;","Officer Decision — Structured Reasoning"),
+                              tags$div(style="margin-bottom:6px;",
+                                tags$div(style="font-size:11px;font-weight:600;color:#374151;margin-bottom:3px;","1. Signal word(s) identified:"),
+                                textInput(paste0("sig_words_",cid),NULL,width="100%",
+                                          placeholder="e.g. kuchinja, madoadoa, waende kwao — comma separated")),
+                              tags$div(style="margin-bottom:6px;",
+                                tags$div(style="font-size:11px;font-weight:600;color:#374151;margin-bottom:3px;","2. What does it denote?"),
+                                selectInput(paste0("sig_denotes_",cid),NULL,width="100%",
+                                  choices=c("Select..."="","Call to physical violence"="CALL_TO_VIOLENCE",
+                                    "Call to expel/remove community"="CALL_TO_EXPEL","Armed uprising"="ARMED_UPRISING",
+                                    "Dehumanisation — animals"="DEHUMANISATION_ANIMAL","Dehumanisation — disease/vermin"="DEHUMANISATION_DISEASE",
+                                    "Derogatory ethnic slur"="ETHNIC_SLUR","Exclusion rhetoric"="EXCLUSION_RHETORIC",
+                                    "Tribal voting call"="ELECTION_TRIBAL","Secessionism"="SECESSIONISM",
+                                    "Religious hatred"="RELIGIOUS_HATRED","Undermining unity"="UNITY_THREAT",
+                                    "Coded hate speech"="CODED_HATE","Other"="OTHER"))),
+                              tags$div(style="margin-bottom:6px;",
+                                tags$div(style="font-size:11px;font-weight:600;color:#374151;margin-bottom:3px;","3. Language / dialect:"),
+                                selectInput(paste0("sig_lang_",cid),NULL,width="100%",
+                                  choices=c("Select..."="","English"="en","Swahili"="sw","Sheng"="sheng",
+                                    "Kikuyu"="kikuyu","Luo (Dholuo)"="luo","Kalenjin"="kalenjin",
+                                    "Luhya"="luhya","Kamba"="kamba","Mixed"="mixed"))),
+                              tags$div(style="margin-bottom:8px;",
+                                tags$div(style="font-size:11px;font-weight:600;color:#374151;margin-bottom:3px;","4. Why this NCIC level?"),
+                                textAreaInput(paste0("sig_reason_",cid),NULL,width="100%",rows=2,
+                                  placeholder="e.g. 'kuchinja' means to slaughter — used to call for violence against the Kikuyu")),
+                              tags$div(style="border-top:1px solid #e5e7eb;padding-top:8px;",
+                                tags$div(style="font-size:10px;font-weight:600;color:#374151;margin-bottom:6px;","5. Decision:"),
+                                tags$div(style="display:flex;gap:6px;flex-wrap:wrap;",
+                                  tags$div(style="display:flex;flex-direction:column;align-items:center;gap:2px;",
+                                    actionButton(paste0("confirm_",cid),"✓ Confirm",class="btn-val-confirm"),
+                                    tags$div(style="font-size:9px;color:#198754;","GPT was correct")),
+                                  tags$div(style="display:flex;flex-direction:column;align-items:center;gap:2px;",
+                                    actionButton(paste0("escalate_",cid),"⬆ Escalate",class="btn-val-escalate"),
+                                    tags$div(style="font-size:9px;color:#dc3545;","More severe")),
+                                  tags$div(style="display:flex;flex-direction:column;align-items:center;gap:2px;",
+                                    actionButton(paste0("dgrade_",cid),"↓ Downgrade",class="btn-val-downgrade"),
+                                    tags$div(style="font-size:9px;color:#fd7e14;","Less severe")),
+                                  tags$div(style="display:flex;flex-direction:column;align-items:center;gap:2px;",
+                                    actionButton(paste0("clear_",cid),"✕ Clear",class="btn-val-clear"),
+                                    tags$div(style="font-size:9px;color:#6c757d;","Not a signal")),
+                                  if(email_ok) tags$div(style="display:flex;flex-direction:column;align-items:center;gap:2px;",
+                                    actionButton(paste0("email_",cid),"📧 Alert",class="btn-val-email"),
+                                    tags$div(style="font-size:9px;color:#0066cc;","Send alert")) else NULL
+                                )
+                              ),
+                              tags$div(style="font-size:10px;color:#9ca3af;margin-top:6px;",
+                                "💡 Fields 1-4 optional but improve keyword learning. Confirm/Escalate on L3+ triggers keyword extraction.")
                             ),
                             uiOutput(paste0("email_status_",cid))
                        )
@@ -4550,6 +5024,17 @@ server <- function(input, output, session) {
         
         do_validate <- function(action_str, new_ncic=NULL, new_label=NULL) {
           officer    <- rv$officer_name
+          # v6: capture structured reasoning fields
+          sig_words   <- isolate(input[[paste0("sig_words_",   cid)]]) %||% ""
+          sig_denotes <- isolate(input[[paste0("sig_denotes_", cid)]]) %||% ""
+          sig_lang    <- isolate(input[[paste0("sig_lang_",    cid)]]) %||% ""
+          sig_reason  <- isolate(input[[paste0("sig_reason_",  cid)]]) %||% ""
+          officer_reasoning <- paste0(
+            if(nchar(trimws(sig_words))>0)   paste0("Signal phrases: ",  sig_words,   ". ") else "",
+            if(nchar(trimws(sig_denotes))>0) paste0("Denotes: ",          sig_denotes, ". ") else "",
+            if(nchar(trimws(sig_lang))>0)    paste0("Language: ",         sig_lang,    ". ") else "",
+            if(nchar(trimws(sig_reason))>0)  paste0("Reasoning: ",        sig_reason,  ".")  else ""
+          )
           ov         <- isolate(input[[paste0("ncic_ov_",cid)]])
           note_val   <- rv$notes[[cid]] %||% ""
           tweet_val  <- rv$cases$tweet_text[rv$cases$case_id==cid][1]
@@ -4573,6 +5058,25 @@ server <- function(input, output, session) {
           new_weights <- update_kw_weights(tweet_val, final_ncic, action_str, rv$kw_weights)
           rv$kw_weights <- new_weights
           save_kw_weights(new_weights)
+
+          # v6: extract keywords from validated post → Supabase
+          extract_and_save_keywords(tweet_val, final_ncic, action_str, officer,
+                                    sig_words, sig_denotes, sig_lang, officer_reasoning)
+
+          # v6: update GPT confidence calibration
+          update_calibration(rv$cases$conf_num[rv$cases$case_id==cid][1], cur_ncic, final_ncic)
+
+          # v6: inter-officer agreement check
+          prev_val <- rv$cases$validated_by[rv$cases$case_id==cid][1]
+          if (!is.na(prev_val) && !is.null(prev_val) && prev_val != officer) {
+            prev_lvl <- rv$cases$officer_ncic_override[rv$cases$case_id==cid][1]
+            if (!is.na(prev_lvl)) {
+              flagged <- log_officer_agreement(cid, prev_val, prev_lvl, officer, final_ncic)
+              if (isTRUE(flagged==1L))
+                showNotification(paste0("Agreement flag: you and ",prev_val," differ by >1 level on ",cid,". Flagged for senior review."),
+                                 type="warning", duration=8)
+            }
+          }
           
           # HITL: add to few-shot example bank
           add_example(tweet_val, final_ncic,
@@ -4635,7 +5139,12 @@ server <- function(input, output, session) {
           }, delay=0.5)
           
           n_examples <- length(load_examples())
-          rv$learning_flash <- paste0("Weights updated · rescoring all cases · ",n_examples," training examples")
+          fields_complete <- sum(c(nchar(trimws(sig_words))>0, nchar(trimws(sig_denotes))>0,
+                                   nchar(trimws(sig_lang))>0,  nchar(trimws(sig_reason))>0))
+          completeness_msg <- if(fields_complete==4) " · full reasoning" else
+                              if(fields_complete>0)  paste0(" · ",fields_complete,"/4 fields") else
+                              " · no reasoning captured"
+          rv$learning_flash <- paste0("Weights updated · rescoring · ",n_examples," examples",completeness_msg)
           later::later(function() rv$learning_flash <- "", 5)
         }
         
@@ -4777,7 +5286,72 @@ server <- function(input, output, session) {
                        options=list(dom="t",pageLength=10,scrollX=TRUE,
                                     columnDefs=list(list(width="200px",targets=3))))
            }
-      )
+      ),
+
+      # v6: Precision / Recall Evaluation
+      card(style="border-top:3px solid #0066cc;margin-top:12px;",
+           card_header(tagList(bs_icon("bullseye")," Precision / Recall Evaluation")),
+           tags$div(style="padding:4px 0;",
+             tags$p(style="font-size:11px;color:#6c757d;margin-bottom:10px;",
+                    "Build a gold standard dataset of manually labelled posts to measure detection quality. Target: precision > 0.80, recall > 0.75, F1 > 0.77."),
+             layout_columns(col_widths=c(6,6),
+               tags$div(
+                 tags$div(style="font-size:11px;font-weight:600;color:#374151;margin-bottom:6px;","Add post to gold standard:"),
+                 textAreaInput("gold_tweet",NULL,placeholder="Paste post text here...",rows=3,width="100%"),
+                 tags$div(style="display:flex;gap:6px;align-items:center;margin-top:4px;",
+                   selectInput("gold_level",NULL,choices=setNames(as.character(0:5),paste0("L",0:5," — ",unname(NCIC_LEVELS))),width="60%"),
+                   actionButton("gold_add_btn",tagList(bs_icon("plus-circle")," Add"),class="btn btn-primary btn-sm")),
+                 uiOutput("gold_count_ui")
+               ),
+               tags$div(
+                 tags$div(style="font-size:11px;font-weight:600;color:#374151;margin-bottom:6px;","Run evaluation:"),
+                 tags$div(style="display:flex;gap:6px;align-items:center;margin-bottom:8px;",
+                   selectInput("eval_threshold","Positive threshold:",choices=c("L2+"="2","L3+"="3","L4+"="4"),selected="3",width="50%"),
+                   actionButton("eval_run_btn",tagList(bs_icon("play-fill")," Run"),class="btn btn-success btn-sm")),
+                 uiOutput("eval_results_ui")
+               )
+             ),
+             tags$div(style="margin-top:10px;",
+               tags$div(style="font-size:11px;font-weight:600;color:#374151;margin-bottom:6px;","History:"),
+               uiOutput("eval_history_ui"))
+           )),
+
+      # v6: Inter-Officer Agreement
+      card(style="border-top:3px solid #0066cc;margin-top:12px;",
+           card_header(tagList(bs_icon("people-fill")," Inter-Officer Agreement (Cohen's κ)")),
+           uiOutput("agreement_ui")),
+
+      # v6: GPT Confidence Calibration
+      card(style="border-top:3px solid #7c3aed;margin-top:12px;",
+           card_header(tagList(bs_icon("graph-up")," GPT Confidence Calibration")),
+           tags$div(style="padding:4px 0;",
+             tags$p(style="font-size:11px;color:#6c757d;margin-bottom:8px;",
+                    "Does GPT confidence 80 mean 80% correct? Bars track actual vs expected accuracy per confidence bucket."),
+             uiOutput("calibration_ui"))),
+
+      # v6: Keyword Retirement
+      card(style="border-top:3px solid #dc3545;margin-top:12px;",
+           card_header(tagList(bs_icon("archive")," Keyword Retirement")),
+           tags$div(style="padding:4px 0;",
+             tags$p(style="font-size:11px;color:#6c757d;margin-bottom:8px;",
+                    "Keywords not matched in 90+ days. Retire stale keywords to keep the pipeline sharp."),
+             uiOutput("stale_keywords_ui"))),
+
+      # v6: Geographic Clustering
+      card(style="border-top:3px solid #fd7e14;margin-top:12px;",
+           card_header(tagList(bs_icon("geo-alt")," Geographic Signal Clustering")),
+           tags$div(style="padding:4px 0;",
+             tags$p(style="font-size:11px;color:#6c757d;margin-bottom:8px;",
+                    "Counties with simultaneous L3+ activity in last 24 hours. Clusters may indicate coordinated campaigns."),
+             uiOutput("cluster_ui"))),
+
+      # v6: Keyword Changelog
+      card(style="border-top:3px solid #6c757d;margin-top:12px;",
+           card_header(tagList(bs_icon("clock-history")," Keyword Bank Changelog")),
+           tags$div(style="padding:4px 0;",
+             tags$p(style="font-size:11px;color:#6c757d;margin-bottom:8px;",
+                    "Full history of keyword additions, retirements, and modifications."),
+             uiOutput("changelog_ui")))
     )
   })
   
@@ -4790,6 +5364,7 @@ server <- function(input, output, session) {
     new_w[[kw]] <- wt
     rv$kw_weights <- new_w
     save_kw_weights(new_w)
+    log_keyword_change(kw, "ADDED", rv$officer_user, new_status="active", reason=paste0("weight=",wt))
     updateTextInput(session, "kw_new_word", value="")
     later::later(function() {
       rv$cases <- rescore_all_cases(rv$cases, rv$kw_weights)
@@ -4806,6 +5381,8 @@ server <- function(input, output, session) {
     new_w[[kw]] <- NULL
     rv$kw_weights <- new_w
     save_kw_weights(new_w)
+    log_keyword_change(kw, "RETIRED", rv$officer_user, old_status="active", new_status="retired",
+                       reason="Manually removed from keyword editor")
     later::later(function() {
       rv$cases <- rescore_all_cases(rv$cases, rv$kw_weights)
       db_save_cases(rv$cases)
@@ -5822,6 +6399,226 @@ server <- function(input, output, session) {
     }
   )
   
+  # ── v6: GOLD STANDARD & EVALUATION outputs ─────────────────────
+  output$gold_count_ui <- renderUI({
+    gold <- db_load_gold()
+    tags$span(style="font-size:10px;color:#9ca3af;",
+              paste0(nrow(gold)," posts in gold standard"))
+  })
+
+  observeEvent(input$gold_add_btn, {
+    tweet <- trimws(input$gold_tweet %||% "")
+    level <- as.integer(input$gold_level %||% "0")
+    req(nchar(tweet) >= 10, rv$authenticated)
+    db_add_gold(tweet, level, rv$officer_name)
+    updateTextAreaInput(session, "gold_tweet", value="")
+    showNotification(paste0("Added to gold standard as L",level,"."), type="message", duration=3)
+  })
+
+  observeEvent(input$eval_run_btn, {
+    gold      <- db_load_gold()
+    threshold <- as.integer(input$eval_threshold %||% "3")
+    req(nrow(gold) >= 5, rv$authenticated)
+    result <- run_evaluation(gold, threshold, rv$officer_name)
+    rv$last_eval <- result
+    showNotification(sprintf("Evaluation complete: F1=%.2f (n=%d)",result$f1%||%0,result$n),
+                     type="message", duration=5)
+  })
+
+  output$eval_results_ui <- renderUI({
+    res <- rv$last_eval
+    if (is.null(res)) return(tags$p(style="font-size:11px;color:#9ca3af;","No evaluation run yet."))
+    p_col <- if(!is.na(res$precision)&&res$precision>=0.80) "#198754" else "#dc3545"
+    r_col <- if(!is.na(res$recall)   &&res$recall   >=0.75) "#198754" else "#dc3545"
+    f_col <- if(!is.na(res$f1)       &&res$f1       >=0.77) "#198754" else "#dc3545"
+    tags$div(style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;",
+      lapply(list(
+        list(label="Precision",val=res$precision,col=p_col,target="target ≥ 0.80"),
+        list(label="Recall",   val=res$recall,   col=r_col,target="target ≥ 0.75"),
+        list(label="F1 Score", val=res$f1,       col=f_col,target="target ≥ 0.77")
+      ), function(m) tags$div(
+        style="background:#f8f9fa;border-radius:6px;padding:8px;text-align:center;",
+        tags$div(style=paste0("font-size:20px;font-weight:700;color:",m$col,";"),
+                 if(is.na(m$val))"—"else sprintf("%.2f",m$val)),
+        tags$div(style="font-size:10px;color:#374151;margin-top:1px;",m$label),
+        tags$div(style="font-size:9px;color:#9ca3af;",m$target)
+      ))
+    )
+  })
+
+  output$eval_history_ui <- renderUI({
+    runs <- db_load_eval_runs()
+    if (nrow(runs)==0) return(tags$p(style="font-size:11px;color:#9ca3af;","No evaluation runs yet."))
+    DT::datatable(runs[,c("run_at","n_total","n_correct","precision_score","recall_score","f1_score","threshold","run_by")],
+                  rownames=FALSE,
+                  colnames=c("Time","N","Correct","Precision","Recall","F1","Threshold","Officer"),
+                  options=list(dom="t",pageLength=8,scrollX=TRUE))
+  })
+
+  # ── v6: INTER-OFFICER AGREEMENT output ──────────────────────────
+  output$agreement_ui <- renderUI({
+    if (!rv$authenticated) return(NULL)
+    kappa_result <- tryCatch(compute_kappa(), error=function(e)
+      list(kappa=NA,n=0L,flagged=0L,pct_agree=0))
+    k   <- kappa_result$kappa
+    n   <- kappa_result$n
+    pct <- kappa_result$pct_agree %||% 0
+    fl  <- kappa_result$flagged   %||% 0L
+    kappa_label <- if(is.na(k)) "Not enough data" else
+      if(k>=0.8) "Almost perfect" else if(k>=0.6) "Substantial" else
+      if(k>=0.4) "Moderate"       else if(k>=0.2) "Fair"        else "Poor"
+    kappa_color <- if(is.na(k)) "#6c757d" else
+      if(k>=0.6) "#198754" else if(k>=0.4) "#fd7e14" else "#dc3545"
+    tagList(
+      tags$div(style="padding:4px 0;",
+        tags$p(style="font-size:11px;color:#6c757d;margin-bottom:10px;",
+               "Tracks agreement between officers validating the same case. Cases differing by >1 NCIC level are flagged for senior review."),
+        tags$div(style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px;",
+          tags$div(style="background:#f8f9fa;border-radius:6px;padding:10px;text-align:center;",
+            tags$div(style=paste0("font-size:24px;font-weight:700;color:",kappa_color,";"),
+                     if(is.na(k))"—"else sprintf("%.2f",k)),
+            tags$div(style="font-size:10px;color:#6c757d;margin-top:2px;",
+                     paste0("Cohen's κ — ",kappa_label))),
+          tags$div(style="background:#f8f9fa;border-radius:6px;padding:10px;text-align:center;",
+            tags$div(style="font-size:24px;font-weight:700;color:#0066cc;",paste0(pct,"%")),
+            tags$div(style="font-size:10px;color:#6c757d;margin-top:2px;",paste0("Agreement (n=",n,")"))),
+          tags$div(style="background:#f8f9fa;border-radius:6px;padding:10px;text-align:center;",
+            tags$div(style=paste0("font-size:24px;font-weight:700;color:",if(fl>0)"#dc3545"else"#198754",";"),fl),
+            tags$div(style="font-size:10px;color:#6c757d;margin-top:2px;","Cases flagged"))),
+        tags$div(style="font-size:10px;color:#6c757d;margin-bottom:8px;",
+                 "κ: 0.0–0.2 Poor · 0.2–0.4 Fair · 0.4–0.6 Moderate · 0.6–0.8 Substantial · 0.8–1.0 Almost perfect"),
+        if (fl > 0) {
+          con <- db_connect(); on.exit(dbDisconnect(con))
+          flagged_df <- tryCatch(dbGetQuery(con,
+            "SELECT case_id,officer_a,level_a,officer_b,level_b,level_delta,ts FROM officer_agreement WHERE flagged=1 ORDER BY ts DESC LIMIT 20"),
+            error=function(e) data.frame())
+          if (nrow(flagged_df)>0)
+            DT::datatable(flagged_df,rownames=FALSE,
+              colnames=c("Case","Officer A","L(A)","Officer B","L(B)","Delta","Time"),
+              options=list(dom="t",pageLength=10,scrollX=TRUE))
+        } else tags$p(style="font-size:12px;color:#198754;","No flagged cases — all officers agree within 1 NCIC level.")
+      )
+    )
+  })
+
+  # ── v6: GPT CALIBRATION output ───────────────────────────────────
+  output$calibration_ui <- renderUI({
+    if (!rv$authenticated) return(NULL)
+    cal <- load_calibration()
+    if (nrow(cal)==0) return(tags$p(style="font-size:11px;color:#9ca3af;",
+      "No calibration data yet — accumulates with each officer decision."))
+    total_n <- sum(cal$n_total)
+    overall <- round(sum(cal$n_correct)/max(total_n,1)*100,1)
+    tagList(
+      tags$div(style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;",
+        tags$div(style="font-size:11px;color:#374151;",paste0("Overall GPT accuracy: ",overall,"% (n=",total_n,")")),
+        tags$div(style=paste0("font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;",
+          if(overall>=75)"background:#d1fae5;color:#065f46;"else"background:#fee2e2;color:#991b1b;"),
+          if(overall>=75)"Well calibrated"else"Needs attention")),
+      tags$div(style="display:flex;flex-direction:column;gap:3px;",
+        lapply(seq_len(nrow(cal)), function(i) {
+          row   <- cal[i,]; bucket <- row$conf_bucket
+          acc   <- row$accuracy %||% 0; exp <- (bucket*10+5)/100
+          color <- if(abs(acc-exp)<0.1)"#198754"else if(acc>exp)"#fd7e14"else"#dc3545"
+          tags$div(style="display:flex;align-items:center;gap:8px;",
+            tags$div(style="font-size:10px;color:#6c757d;min-width:60px;text-align:right;",
+                     paste0(bucket*10,"–",bucket*10+10,"%")),
+            tags$div(style="flex:1;height:14px;background:#e9ecef;border-radius:3px;overflow:hidden;position:relative;",
+              tags$div(style=paste0("position:absolute;left:",round(exp*100),"%;top:0;width:1px;height:100%;background:#9ca3af;")),
+              tags$div(style=paste0("width:",round(acc*100),"%;height:100%;background:",color,";border-radius:3px;"))),
+            tags$div(style=paste0("font-size:10px;font-weight:600;min-width:36px;color:",color,";"),paste0(round(acc*100),"%")),
+            tags$div(style="font-size:9px;color:#9ca3af;min-width:30px;",paste0("n=",row$n_total)))
+        })),
+      tags$div(style="font-size:9px;color:#9ca3af;margin-top:6px;",
+               "Grey line = expected. Bar = actual. Orange = overconfident. Red = underconfident.")
+    )
+  })
+
+  # ── v6: KEYWORD RETIREMENT output & observer ────────────────────
+  output$stale_keywords_ui <- renderUI({
+    if (!rv$authenticated) return(NULL)
+    stale <- tryCatch(fetch_stale_keywords(90L), error=function(e) data.frame())
+    if (nrow(stale)==0) return(tags$p(style="font-size:12px;color:#198754;padding:8px;",
+      "No stale keywords — all matched within last 90 days."))
+    tagList(
+      tags$div(style="font-size:11px;color:#dc3545;font-weight:600;margin-bottom:8px;",
+               paste0(nrow(stale)," keyword(s) not matched in 90+ days:")),
+      tags$div(style="max-height:200px;overflow-y:auto;",
+        lapply(seq_len(nrow(stale)), function(i) {
+          row <- stale[i,]; kw_id <- row$id
+          tags$div(style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding:6px 8px;background:#fff5f5;border-radius:6px;border:1px solid #fecaca;",
+            tags$div(style="flex:1;",
+              tags$div(style="font-size:12px;font-family:'IBM Plex Mono';color:#374151;font-weight:600;",row$keyword),
+              tags$div(style="font-size:10px;color:#9ca3af;margin-top:2px;",
+                paste0("T",row$tier," · ",row$category," · ",row$language,
+                       " · matched ",row$times_matched,"x · last: ",
+                       if(!is.na(row$last_matched_at))substr(row$last_matched_at,1,10)else"never"))),
+            textInput(paste0("retire_reason_",kw_id),NULL,placeholder="Reason (optional)",width="180px"),
+            actionButton(paste0("retire_kw_",kw_id),tagList(bs_icon("archive")," Retire"),
+              class="btn btn-outline-danger btn-sm",
+              onclick=sprintf("Shiny.setInputValue('retire_kw_target','%s',{priority:'event'})",kw_id)))
+        }))
+    )
+  })
+
+  observeEvent(input$retire_kw_target, {
+    kw_id   <- input$retire_kw_target
+    reason  <- isolate(input[[paste0("retire_reason_",kw_id)]]) %||% ""
+    officer <- rv$officer_name
+    req(nchar(kw_id)>0, rv$authenticated)
+    success <- retire_keyword(kw_id, officer, reason)
+    if (success) {
+      showNotification("Keyword retired. Pipeline cache cleared.", type="message", duration=4)
+      kw_cache <- file.path("cache","tg_keyword_cache.json")
+      if (file.exists(kw_cache)) tryCatch(file.remove(kw_cache),error=function(e) NULL)
+      audit(rv$officer_user, officer, "KEYWORD",
+            detail=paste0("Retired keyword ID ",kw_id,": ",reason))
+    } else showNotification("Retirement failed — check logs.", type="error", duration=5)
+  })
+
+  # ── v6: GEOGRAPHIC CLUSTERING output ────────────────────────────
+  output$cluster_ui <- renderUI({
+    if (!rv$authenticated) return(NULL)
+    clusters <- tryCatch(detect_county_clusters(rv$cases,24L,3L,2L),
+                         error=function(e) data.frame())
+    if (nrow(clusters)==0) return(tags$p(style="font-size:11px;color:#198754;",
+      "No geographic clusters in last 24 hours."))
+    shared <- attr(clusters,"shared_keywords") %||% character()
+    tagList(
+      if (length(shared)>0)
+        tags$div(style="background:#fff3cd;border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:#664d03;",
+                 paste0("Shared keywords: ",paste0('"',shared,'"',collapse=", "))),
+      tags$div(style="display:flex;flex-direction:column;gap:4px;",
+        lapply(seq_len(nrow(clusters)), function(i) {
+          row <- clusters[i,]; nc <- ncic_color(row$max_level)
+          tags$div(style=paste0("display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;background:",nc,"0d;border-left:3px solid ",nc,";"),
+            tags$div(style="flex:1;",
+              tags$div(style="font-size:12px;font-weight:600;color:#374151;",row$county),
+              tags$div(style="font-size:10px;color:#6c757d;margin-top:1px;",
+                       paste0(row$n_cases," cases · max L",row$max_level," · ",row$top_keyword))),
+            tags$div(style=paste0("font-size:11px;font-weight:700;color:",nc,";"),paste0("L",row$max_level)))
+        }))
+    )
+  })
+
+  # ── v6: KEYWORD CHANGELOG output ────────────────────────────────
+  output$changelog_ui <- renderUI({
+    if (!rv$authenticated) return(NULL)
+    log <- load_keyword_changelog(50L)
+    if (nrow(log)==0) return(tags$p(style="font-size:11px;color:#9ca3af;",
+      "No keyword changes logged yet."))
+    action_color <- function(a) switch(a,ADDED="#198754",RETIRED="#dc3545",MODIFIED="#fd7e14",RESTORED="#0066cc","#6c757d")
+    log$action_html <- sapply(log$action, function(a) {
+      col <- action_color(a)
+      sprintf('<span style="background:%s18;color:%s;border:1px solid %s44;border-radius:3px;padding:1px 6px;font-size:10px;font-weight:700;">%s</span>',col,col,col,a)
+    })
+    DT::datatable(log[,c("changed_at","keyword","action_html","old_tier","new_tier","changed_by","reason")],
+                  rownames=FALSE, escape=FALSE,
+                  colnames=c("Time","Keyword","Action","Old Tier","New Tier","Officer","Reason"),
+                  options=list(dom="frtip",pageLength=15,scrollX=TRUE,order=list(list(0,"desc")),
+                    columnDefs=list(list(width="140px",targets=0),list(width="80px",targets=2))))
+  })
+
   # ── Wire audit() calls into existing validation observers ──────
   # Patch: log every officer validation decision
   session$onSessionEnded(function() {

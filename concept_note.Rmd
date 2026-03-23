@@ -1,10 +1,16 @@
 ---
-title: ""
+title: "Radicalisation Signals — AI Early Warning Platform for Kenya"
+subtitle: "Concept Note · NCIC Act Cap 170 · v5"
+author: "Noah Wamalwa · IEA Kenya NIRU AI Hackathon"
+date: "`r format(Sys.Date(), '%B %Y')`"
 output:
   pdf_document:
     toc: false
     number_sections: false
     latex_engine: xelatex
+    includes:
+      in_header: []
+# title/author/date are set for PDF metadata only — visual title is in the tcolorbox cover block below
 geometry: "top=0.6in, bottom=0.8in, left=0.85in, right=0.85in"
 fontsize: 10.5pt
 header-includes:
@@ -47,6 +53,7 @@ header-includes:
   - \renewcommand{\footrulewidth}{0.3pt}
   - \setlength{\parskip}{5pt}
   - \setlength{\parindent}{0pt}
+  - \AtBeginDocument{\let\maketitle\relax}
 ---
 
 ```{r setup, include=FALSE}

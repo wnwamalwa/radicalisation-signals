@@ -47,8 +47,8 @@ check_password_strength <- function(password, username) {
     errors <- c(errors, "At least one special character required (e.g. ! @ # $ %).")
   if (tolower(password) == tolower(username))
     errors <- c(errors, "Password must not match the username.")
-  if (grepl("password|ncic|admin|officer|intel|kenya", tolower(password)))
-    errors <- c(errors, "Password must not contain common words (password, ncic, admin, kenya, intel).")
+  if (grepl("password|ncic|admin|officer|intel|kenya|2024|2025|2026", tolower(password)))
+    errors <- c(errors, "Password must not contain common words (password, ncic, admin, etc.).")
   errors
 }
 
@@ -56,7 +56,7 @@ if (!file.exists(DB_FILE))
   stop("Database not found at: ", DB_FILE,
        "\nRun the Shiny app at least once first to initialise the DB.")
 
-con <- dbConnect(SQLite(), DB_FILE)
+con <- local({ c <- dbConnect(SQLite(), DB_FILE); invisible(c); c })
 on.exit(dbDisconnect(con))
 
 # Ensure officers table exists (in case running before app first launch)

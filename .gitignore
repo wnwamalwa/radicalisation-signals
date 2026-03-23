@@ -21,3 +21,4 @@ tg_session*
 tg_raw_messages.csv
 tg_last_run.json
 tg_keyword_cache.json
+concept_note.pdf

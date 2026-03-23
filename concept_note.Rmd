@@ -1,0 +1,444 @@
+---
+title: "Radicalisation Signals — AI Early Warning Platform for Kenya"
+subtitle: "Concept Note · NCIC Act Cap 170 · v6"
+author: "Noah Wamalwa · IEA Kenya NIRU AI Hackathon"
+date: "`r format(Sys.Date(), '%B %Y')`"
+output:
+  pdf_document:
+    toc: false
+    number_sections: false
+    latex_engine: xelatex
+    includes:
+      in_header: []
+geometry: "top=0.6in, bottom=0.8in, left=0.85in, right=0.85in"
+fontsize: 10.5pt
+header-includes:
+  - \usepackage{fontspec}
+  - \usepackage{fancyhdr}
+  - \usepackage{graphicx}
+  - \usepackage{xcolor}
+  - \usepackage{mdframed}
+  - \usepackage{booktabs}
+  - \usepackage{array}
+  - \usepackage{colortbl}
+  - \usepackage{tabularx}
+  - \usepackage{multirow}
+  - \usepackage{enumitem}
+  - \usepackage{tcolorbox}
+  - \usepackage{hyperref}
+  - \usepackage{parskip}
+  - \usepackage{setspace}
+  - \tcbuselibrary{skins,breakable}
+  - \definecolor{ncicblue}{HTML}{0066CC}
+  - \definecolor{ncicdark}{HTML}{0A1628}
+  - \definecolor{ncicpurple}{HTML}{7C3AED}
+  - \definecolor{ncicred}{HTML}{DC3545}
+  - \definecolor{ncicorange}{HTML}{FD7E14}
+  - \definecolor{ncicamber}{HTML}{FFC107}
+  - \definecolor{ncicgreen}{HTML}{198754}
+  - \definecolor{ncicdarkred}{HTML}{7B0000}
+  - \definecolor{ncicgray}{HTML}{6C757D}
+  - \definecolor{nciclight}{HTML}{F0F4F8}
+  - \definecolor{warningbg}{HTML}{FFF8E1}
+  - \definecolor{infobg}{HTML}{F0F9FF}
+  - \definecolor{successbg}{HTML}{F0FFF4}
+  - \definecolor{purplebg}{HTML}{F8F0FF}
+  - \pagestyle{fancy}
+  - \fancyhf{}
+  - \fancyhead[L]{\small\textcolor{ncicblue}{\textbf{Radicalisation Signals}}\;\textcolor{ncicgray}{| NCIC Cap 170 Intelligence Platform | v6}}
+  - \fancyhead[R]{\small\textcolor{ncicred}{\textbf{RESTRICTED}}\;\textcolor{ncicgray}{--- Not for Public Distribution}}
+  - \fancyfoot[L]{\small\textcolor{ncicgray}{Noah Wamalwa \textbullet\ IEA Kenya NIRU AI Hackathon}}
+  - \fancyfoot[R]{\small\textcolor{ncicgray}{\thepage}}
+  - \renewcommand{\headrulewidth}{0.6pt}
+  - \renewcommand{\footrulewidth}{0.3pt}
+  - \setlength{\parskip}{5pt}
+  - \setlength{\parindent}{0pt}
+  - \AtBeginDocument{\let\maketitle\relax}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
+```
+
+\begin{tcolorbox}[
+  enhanced,
+  colback=ncicdark,
+  colframe=ncicblue,
+  arc=6pt,
+  boxrule=1.5pt,
+  left=16pt, right=16pt, top=14pt, bottom=14pt
+]
+\begin{center}
+{\fontsize{20}{24}\selectfont\bfseries\textcolor{white}{Radicalisation Signals}}\\[4pt]
+{\fontsize{11}{14}\selectfont\textcolor{ncicblue!80!white}{AI Early Warning Platform for Kenya}}\\[6pt]
+\textcolor{white!40!ncicdark}{\rule{0.6\textwidth}{0.3pt}}\\[5pt]
+{\small\textcolor{white!70!ncicdark}{NCIC Act Cap 170\quad\textbullet\quad GPT-4o-mini + Human-in-the-Loop\quad\textbullet\quad 47 Counties\quad\textbullet\quad v6}}\\[3pt]
+{\small\textcolor{ncicblue!80!white}{\texttt{https://wnwamalwa.shinyapps.io/Radicalisation-Signals/}}}
+\end{center}
+\end{tcolorbox}
+
+\vspace{0.3em}
+
+\begin{tcolorbox}[enhanced, colback=warningbg, colframe=ncicorange, arc=4pt, boxrule=1pt, left=10pt, right=10pt, top=5pt, bottom=5pt]
+\small\textbf{\textcolor{ncicred}{Important:}} AI classifications are analytical aids, not legal findings. All Level 4--5 classifications require independent officer validation and legal review before any action is taken. \textbf{This document is restricted and not for public distribution.}
+\end{tcolorbox}
+
+\vspace{0.4em}
+
+\noindent\colorbox{ncicblue}{\parbox{\textwidth}{\vspace{3pt}\hspace{6pt}\textbf{\textcolor{white}{\large 1\quad Overview}}\vspace{3pt}}}
+
+\vspace{0.3em}
+
+\textbf{Radicalisation Signals} is an AI-assisted intelligence platform designed to support the \textbf{National Cohesion and Integration Commission (NCIC)} of Kenya in monitoring and analysing online content linked to hate speech, ethnic incitement, dehumanisation, and radicalisation. The platform enables \textbf{early detection of harmful narratives} across digital platforms, supporting timely, coordinated, and evidence-based interventions at both national and sub-county levels.
+
+\begin{tcolorbox}[enhanced, colback=infobg, colframe=ncicblue, arc=4pt, boxrule=0.8pt, left=10pt, right=10pt, top=6pt, bottom=6pt]
+\begin{tabular}{@{}p{3.2cm}p{10.0cm}@{}}
+\textcolor{ncicblue}{\textbf{Signal ingestion}}   & Telegram (MTProto), YouTube — live pipelines; Twitter/X, Facebook, TikTok, WhatsApp planned \\[2pt]
+\textcolor{ncicblue}{\textbf{AI classification}}  & GPT-4o-mini against the NCIC 6-level taxonomy under Cap 170 \\[2pt]
+\textcolor{ncicblue}{\textbf{Keyword bank}}        & Adaptive Supabase keyword bank — grows from officer validations, auto-retires stale terms \\[2pt]
+\textcolor{ncicblue}{\textbf{Risk scoring}}        & Composite formula: AI confidence + adaptive keywords + network + source history \\[2pt]
+\textcolor{ncicblue}{\textbf{Officer validation}}  & Structured HITL: signal phrases, denotation, language, reasoning + decision \\[2pt]
+\textcolor{ncicblue}{\textbf{Forecasting}}         & Prophet 14-day county escalation forecast with election proximity regressor (2027 ready) \\[2pt]
+\textcolor{ncicblue}{\textbf{Quality control}}     & Inter-officer agreement (Cohen's \(\kappa\)), GPT calibration, precision/recall evaluation \\[2pt]
+\textcolor{ncicblue}{\textbf{S13 Queue}}           & L4/L5 cases tracked: Pending \textrightarrow\ Filed \textrightarrow\ DCI Alerted \textrightarrow\ Resolved \\[2pt]
+\textcolor{ncicblue}{\textbf{Audit trail}}         & Tamper-evident log of every officer action with timestamp and session ID \\[2pt]
+\textcolor{ncicblue}{\textbf{Reporting}}           & Excel exports: Quick Briefing, Detailed Report, NCIC Legal Report, County \\
+\end{tabular}
+\end{tcolorbox}
+
+\vspace{0.5em}
+
+\noindent\colorbox{ncicblue}{\parbox{\textwidth}{\vspace{3pt}\hspace{6pt}\textbf{\textcolor{white}{\large 2\quad Data Coverage \& Pipeline Architecture}}\vspace{3pt}}}
+
+\vspace{0.3em}
+
+All \textbf{47 counties} of Kenya are covered using real \textbf{IEBC administrative boundaries}, with signals attributed to specific sub-locations. The platform operates two live ingestion pipelines that run on a scheduled basis, writing directly to a \textbf{Supabase cloud database}.
+
+\vspace{0.3em}
+
+\noindent\begin{minipage}[t]{0.47\textwidth}
+\small\textbf{\textcolor{ncicblue}{Live Pipelines (v6)}}\\[3pt]
+\begin{tabular}{@{}p{2.2cm}p{4.0cm}@{}}
+\toprule
+\textbf{Pipeline} & \textbf{Method} \\
+\midrule
+Telegram        & MTProto (Telethon) — dynamic channel discovery, no hardcoded channels \\[2pt]
+YouTube         & Data API v3 — video comments from Kenya-relevant content \\[2pt]
+Keywords        & GPT-4o-mini extracts new signal terms from validated posts \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\small\textbf{\textcolor{ncicpurple}{Language Coverage \& Detection}}\\[3pt]
+\begin{tabular}{@{}p{1.7cm}p{4.6cm}@{}}
+\toprule
+\textbf{Language} & \textbf{Detection method} \\
+\midrule
+Swahili/English & GPT-4o-mini detection \\
+Sheng           & GPT + urban slang glossary \\
+Kikuyu          & GPT + hate-speech glossary \\
+Kalenjin        & GPT + PEV-era rhetoric hints \\
+Luo             & GPT + expulsion marker glossary \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+
+\vspace{0.3em}
+
+\begin{tcolorbox}[enhanced, colback=successbg, colframe=ncicgreen, arc=3pt, boxrule=0.6pt, left=8pt, right=8pt, top=4pt, bottom=4pt]
+\small\textbf{\textcolor{ncicgreen}{Adaptive keyword bank:}} Officer validations automatically extract new signal keywords via GPT-4o-mini and store them in Supabase. The detection pipeline reads only approved keywords. Keywords inactive for 90+ days are flagged for retirement. Every change is logged in a version history table.
+\end{tcolorbox}
+
+\vspace{0.5em}
+
+\noindent\colorbox{ncicblue}{\parbox{\textwidth}{\vspace{3pt}\hspace{6pt}\textbf{\textcolor{white}{\large 3\quad The NCIC 6-Level Classification Taxonomy}}\vspace{3pt}}}
+
+\vspace{0.3em}
+
+All content is classified against Cap 170 on a six-point scale. Levels 0--1 are \textbf{protected speech}. Levels 4--5 cross the \textbf{Section 13 legal threshold}.
+
+\vspace{0.2em}
+
+\noindent\begin{tabular}{@{}p{0.4cm}p{3.1cm}p{8.3cm}p{1.4cm}@{}}
+\toprule
+\textbf{L} & \textbf{Label} & \textbf{Recommended Action} & \textbf{S13} \\
+\midrule
+\rowcolor{ncicgreen!15}
+\textbf{0} & Neutral Discussion & No action. Log for trend analysis. & --- \\
+\rowcolor{ncicgreen!8}
+\textbf{1} & Offensive Language & Monitor. Flag for weekly review. & --- \\
+\rowcolor{ncicamber!25}
+\textbf{2} & Prejudice / Stereotyping & Document pattern. Request platform review if repeated. & --- \\
+\rowcolor{ncicorange!20}
+\textbf{3} & Dehumanization & Issue monitoring flag. Initiate engagement with poster. & --- \\
+\rowcolor{ncicred!18}
+\textbf{4} & \textbf{Hate Speech} & \textbf{Section 13 threshold met. Require takedown. Alert DCI.} & \textcolor{ncicred}{\textbf{YES}} \\
+\rowcolor{ncicdarkred!18}
+\textbf{5} & \textbf{Toxic} & \textbf{IMMEDIATE ESCALATION. Press charges. Contact DCI now.} & \textcolor{ncicred}{\textbf{YES}} \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+
+\noindent\colorbox{ncicblue}{\parbox{\textwidth}{\vspace{3pt}\hspace{6pt}\textbf{\textcolor{white}{\large 4\quad Classification Methodology \& Risk Scoring}}\vspace{3pt}}}
+
+\vspace{0.3em}
+
+\textbf{Three-Stage Decision Chain}
+
+\vspace{0.2em}
+\noindent\begin{tcolorbox}[enhanced, colback=ncicred!8, colframe=ncicred, arc=3pt, boxrule=0.7pt, left=8pt, right=8pt, top=4pt, bottom=4pt]
+\small\textbf{\textcolor{ncicred}{Stage 1 --- Violence Override (unconditional):}} Any call to kill, attack, burn, or physically harm --- regardless of target --- immediately classifies L4/L5. Activism test blocked. \textit{Examples: 'Chinja wote' \textrightarrow\ L5. 'Mpige risasi' \textrightarrow\ L5.}
+\end{tcolorbox}
+\vspace{0.15em}
+\noindent\begin{tcolorbox}[enhanced, colback=ncicorange!8, colframe=ncicorange, arc=3pt, boxrule=0.7pt, left=8pt, right=8pt, top=4pt, bottom=4pt]
+\small\textbf{\textcolor{ncicorange}{Stage 2 --- Target Test:}} Is the target a \textit{protected group} (ethnic, religious, regional) or a \textit{public official}? Criticism of officials defaults to L0/L1 --- political accountability is constitutionally protected.
+\end{tcolorbox}
+\vspace{0.15em}
+\noindent\begin{tcolorbox}[enhanced, colback=ncicgreen!8, colframe=ncicgreen, arc=3pt, boxrule=0.7pt, left=8pt, right=8pt, top=4pt, bottom=4pt]
+\small\textbf{\textcolor{ncicgreen}{Stage 3 --- Intent Test:}} Accountability ('vote out', 'resign') \textrightarrow\ L0/L1. Exclusion ('waende') \textrightarrow\ L3/L4. Dehumanisation ('they are vermin') \textrightarrow\ L3+. Mobilisation \textrightarrow\ L4.
+\end{tcolorbox}
+
+\vspace{0.4em}
+
+\textbf{Risk Score Formula}
+
+$$\text{Risk} = 0.55 \times \text{composite} + 0.45 \times \text{NCIC\_base}$$
+$$\text{composite} = 0.30 \times \text{conf} + 0.22 \times \text{kw} + 0.13 \times \text{net} + 0.08 \times \text{spike} + 0.12 \times \text{ctx} + 0.15 \times \text{src\_hist}$$
+
+\vspace{0.2em}
+
+\noindent\begin{tabular}{@{}p{1.8cm}p{0.9cm}p{10cm}@{}}
+\toprule
+\textbf{Component} & \textbf{Wt} & \textbf{Description} \\
+\midrule
+\texttt{conf}       & 30\% & GPT-4o-mini self-reported certainty (0--100). Largest single driver. \\
+\texttt{kw}         & 22\% & Adaptive keyword score --- updates on every officer validation. \\
+\texttt{net}        & 13\% & Network exposure --- estimated reach and amplification risk. \\
+\texttt{spike}      & 8\%  & Frequency spike above county baseline. \\
+\texttt{ctx}        & 12\% & Contextual factors flagged by GPT (each factor = +8 pts). \\
+\texttt{src\_hist}  & 15\% & Handle/county posting pattern over 30 days (capped +30). \\
+\texttt{NCIC\_base} & 45\% & Fixed base per level: L0=2, L1=15, L2=30, L3=55, L4=72, L5=92. \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.4em}
+
+\textbf{Worked Examples --- L0 to L5}
+
+\vspace{0.15em}
+
+\noindent\begin{tcolorbox}[enhanced, colback=ncicgreen!10, colframe=ncicgreen, arc=3pt, boxrule=0.6pt, left=8pt, right=8pt, top=3pt, bottom=3pt, title={\small\textbf{\textcolor{white}{L0 Neutral --- Score: 14 --- No action}}}, colbacktitle=ncicgreen]
+\small\textit{"Heshima kwa wote, hakuna kabila bora kuliko lingine"}\newline
+\texttt{\footnotesize base(2) + 0.30x95 + 0.22x0 + 0.13x10 + 0.12x0 + 0.15x0 = \textbf{14}}
+\end{tcolorbox}
+\vspace{0.1em}
+\noindent\begin{tcolorbox}[enhanced, colback=ncicamber!15, colframe=ncicamber!80!black, arc=3pt, boxrule=0.6pt, left=8pt, right=8pt, top=3pt, bottom=3pt, title={\small\textbf{L1 Offensive --- Score: 22 --- Monitor}}, colbacktitle=ncicamber!80!black, coltitle=white]
+\small\textit{"These politicians are useless thieves, all of them"}\newline
+\texttt{\footnotesize base(15) + 0.30x80 + 0.22x10 + 0.13x20 + 0.12x0 + 0.15x0 = \textbf{22}}
+\end{tcolorbox}
+\vspace{0.1em}
+\noindent\begin{tcolorbox}[enhanced, colback=ncicorange!10, colframe=ncicorange, arc=3pt, boxrule=0.6pt, left=8pt, right=8pt, top=3pt, bottom=3pt, title={\small\textbf{\textcolor{white}{L2 Prejudice --- Score: 36 --- Document pattern}}}, colbacktitle=ncicorange]
+\small\textit{"Kabila fulani hawastahili nafasi katika serikali"}\newline
+\texttt{\footnotesize base(30) + 0.30x78 + 0.22x20 + 0.13x25 + 0.12x8 + 0.15x0 = \textbf{36}}
+\end{tcolorbox}
+\vspace{0.1em}
+\noindent\begin{tcolorbox}[enhanced, colback=ncicorange!20, colframe=ncicorange!80!ncicred, arc=3pt, boxrule=0.6pt, left=8pt, right=8pt, top=3pt, bottom=3pt, title={\small\textbf{\textcolor{white}{L3 Dehumanization --- Score: 56 --- Monitoring flag}}}, colbacktitle=ncicorange!80!ncicred]
+\small\textit{"Watu wa kabila hiyo ni kama magonjwa --- wanaharibu nchi yetu"}\newline
+\texttt{\footnotesize base(55) + 0.30x82 + 0.22x28 + 0.13x40 + 0.12x16 + 0.15x0 = \textbf{56}}
+\end{tcolorbox}
+\vspace{0.1em}
+\noindent\begin{tcolorbox}[enhanced, colback=ncicred!10, colframe=ncicred, arc=3pt, boxrule=0.8pt, left=8pt, right=8pt, top=3pt, bottom=3pt, title={\small\textbf{\textcolor{white}{L4 Hate Speech --- Score: 73 --- Section 13 --- Takedown. Alert DCI}}}, colbacktitle=ncicred]
+\small\textit{"Waende kwao --- hawastahili kuishi hapa Kenya yetu"}\newline
+\texttt{\footnotesize base(72) + 0.30x85 + 0.22x30 + 0.13x60 + 0.12x16 + 0.15x0 = \textbf{73}}
+\end{tcolorbox}
+\vspace{0.1em}
+\noindent\begin{tcolorbox}[enhanced, colback=ncicdarkred!10, colframe=ncicdarkred, arc=3pt, boxrule=1pt, left=8pt, right=8pt, top=3pt, bottom=3pt, title={\small\textbf{\textcolor{white}{L5 Toxic --- Score: 91 --- Section 13 --- IMMEDIATE ESCALATION. Press charges}}}, colbacktitle=ncicdarkred]
+\small\textit{"Chinja wote wa kabila hiyo --- tutawaonyesha nguvu kesho"}\newline
+\texttt{\footnotesize base(92) + 0.30x96 + 0.22x45 + 0.13x80 + 0.12x24 + 0.15x20 = \textbf{91}}
+\end{tcolorbox}
+
+\vspace{0.5em}
+
+\noindent\colorbox{ncicblue}{\parbox{\textwidth}{\vspace{3pt}\hspace{6pt}\textbf{\textcolor{white}{\large 5\quad Forecast Engine (v6)}}\vspace{3pt}}}
+
+\vspace{0.3em}
+
+The platform uses a \textbf{two-tier forecasting system} per county, producing a 14-day escalation score and forecast level (STABLE / MONITORED / ELEVATED / HIGH / CRITICAL).
+
+\vspace{0.2em}
+
+\noindent\begin{minipage}[t]{0.47\textwidth}
+\small\textbf{\textcolor{ncicblue}{Tier 1 --- Prophet Time-Series Model}}\\[3pt]
+\begin{tabular}{@{}p{2.4cm}p{3.6cm}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value (v6)} \\
+\midrule
+Training window   & 90 days (was 30) \\
+Target variable   & Daily max risk score (was mean) \\
+Seasonality       & Weekly enabled \\
+Changepoint scale & 0.15 \\
+Confidence band   & 80\% \\
+Escalation score  & Mean yhat (point estimate) \\
+Worst-case flag   & yhat\_upper \textgreater\ 70 \\
+Min data          & 14 obs, 3 calendar weeks \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\small\textbf{\textcolor{ncicorange}{Election Proximity Regressor (v6 — new)}}\\[3pt]
+\begin{tabular}{@{}p{2.2cm}p{3.8cm}@{}}
+\toprule
+\textbf{Feature} & \textbf{Detail} \\
+\midrule
+Purpose     & Kenya hate speech spikes with elections \\
+Method      & Prophet add\_regressor() \\
+Score       & 0--1; 1.0 = election day \\
+Window      & 180-day proximity window \\
+Calendar    & 2007, 2013, 2017, 2022, 2027 \\
+Heuristic   & Up to +15 pts in election window \\
+\bottomrule
+\end{tabular}\\[4pt]
+\small\textbf{\textcolor{ncicgreen}{Tier 2 --- Heuristic Fallback}}\\[2pt]
+\small Used when \textless\ 14 observations or \textless\ 3 calendar weeks of data. Formula: $0.35 \times \text{avg\_risk} + 8 \times \text{avg\_ncic} + 3 \times n_{\text{high}} + 0.5 \times \text{trend} + 4 \times \text{velocity} + 15 \times \text{el\_prox}$
+\end{minipage}
+
+\vspace{0.3em}
+
+\begin{tcolorbox}[enhanced, colback=infobg, colframe=ncicblue, arc=3pt, boxrule=0.6pt, left=8pt, right=8pt, top=4pt, bottom=4pt]
+\small\textbf{\textcolor{ncicblue}{Forecast accuracy logging:}} Every forecast run is stored in SQLite (\texttt{forecast\_log} table) with county, score, level, and election proximity. After 7 days, predicted scores are compared to actual observed scores to compute MAE (Mean Absolute Error) per county. Visible in the Methodology tab of the platform.
+\end{tcolorbox}
+
+\vspace{0.5em}
+
+\noindent\colorbox{ncicblue}{\parbox{\textwidth}{\vspace{3pt}\hspace{6pt}\textbf{\textcolor{white}{\large 6\quad Human-in-the-Loop \& Quality Control (v6)}}\vspace{3pt}}}
+
+\vspace{0.3em}
+
+\noindent\begin{minipage}[t]{0.47\textwidth}
+\small\textbf{\textcolor{ncicblue}{Structured Officer Decision (v6 --- new)}}\\[3pt]
+Officers record four structured fields on every L3+ validation:
+\begin{itemize}[leftmargin=10pt, itemsep=1pt, topsep=2pt]
+  \small\item \textbf{Signal phrases} --- exact words from the post
+  \item \textbf{Denotation} --- what the phrase means (17 categories)
+  \item \textbf{Language/dialect} --- En, Sw, Sheng, Kikuyu, Luo, Kalenjin
+  \item \textbf{Reasoning} --- cultural/linguistic justification
+\end{itemize}
+\vspace{3pt}
+Officer-identified phrases bypass GPT as \textbf{ground truth} and enter the keyword bank directly as Tier 3 approved keywords.
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\small\textbf{\textcolor{ncicpurple}{Quality Control Metrics (v6 --- new)}}\\[3pt]
+\begin{tabular}{@{}p{2.8cm}p{3.4cm}@{}}
+\toprule
+\textbf{Metric} & \textbf{Purpose} \\
+\midrule
+Cohen's \(\kappa\)   & Inter-officer agreement; cases differing by \textgreater1 level flagged for senior review \\[2pt]
+GPT calibration & Tracks whether GPT confidence 80 = 80\% correct; overconfident buckets flagged \\[2pt]
+Precision/Recall & Gold standard dataset; F1 score tracked across runs \\[2pt]
+Forecast MAE    & Predicted vs actual risk score per county after 7 days \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+
+\vspace{0.5em}
+
+\noindent\colorbox{ncicblue}{\parbox{\textwidth}{\vspace{3pt}\hspace{6pt}\textbf{\textcolor{white}{\large 7\quad Safeguards and Responsible Use}}\vspace{3pt}}}
+
+\vspace{0.3em}
+
+\noindent\begin{tabular}{@{}p{0.3cm}p{3.6cm}p{9.2cm}@{}}
+\textbf{1}  & \textbf{Mandatory human review}      & No legal action triggered by AI alone. Every L2+ requires officer decision. \\[2pt]
+\textbf{2}  & \textbf{Activism protection}         & 3-stage chain protects political accountability speech from misclassification. \\[2pt]
+\textbf{3}  & \textbf{Continuous re-calibration}   & Keyword weights updated on every validation. All cases auto-rescored. \\[2pt]
+\textbf{4}  & \textbf{Deterministic output}        & \texttt{temperature=0} --- same post always returns same classification. \\[2pt]
+\textbf{5}  & \textbf{Schema-constrained}          & GPT returns strict JSON only --- no free-text hallucination possible. \\[2pt]
+\textbf{6}  & \textbf{Confidence scoring}          & Below 60\% flagged LOW --- officer alerted to model uncertainty. \\[2pt]
+\textbf{7}  & \textbf{Language-aware}              & Kikuyu/Kalenjin/Luo/Sheng glossaries injected into classification prompt. \\[2pt]
+\textbf{8}  & \textbf{Session security}            & bcrypt credentials, RBAC, 20-min timeout, supervisor email, audit log. \\[2pt]
+\textbf{9}  & \textbf{S13 escalation queue}        & Confirmed L4/L5 cases tracked through legal workflow to DCI referral. \\[2pt]
+\textbf{10} & \textbf{Inter-officer agreement}     & Cohen's \(\kappa\) tracked live; disagreements \textgreater1 level flagged for senior review. \\[2pt]
+\textbf{11} & \textbf{Keyword retirement}          & Keywords inactive 90+ days flagged and retired; full changelog maintained. \\[2pt]
+\textbf{12} & \textbf{Geographic clustering}       & Simultaneous L3+ activity across 2+ counties triggers coordinated campaign alert. \\
+\end{tabular}
+
+\vspace{0.5em}
+
+\noindent\colorbox{ncicblue}{\parbox{\textwidth}{\vspace{3pt}\hspace{6pt}\textbf{\textcolor{white}{\large 8\quad System Architecture (v6)}}\vspace{3pt}}}
+
+\vspace{0.3em}
+
+\noindent\begin{tabular}{@{}p{2.8cm}p{10.4cm}@{}}
+\toprule
+\textbf{Component} & \textbf{Description} \\
+\midrule
+\texttt{app.R}              & Entry point (22 lines) --- wires server + shinyApp() \\
+\texttt{global.R}           & Packages, source() calls, shared globals --- runs once before UI and server \\
+\texttt{R/core/}            & constants.R, db.R, scoring.R --- foundation layer \\
+\texttt{R/data/}            & data.R (counties, shapefile), gpt.R (GPT, language detection, Prophet) \\
+\texttt{R/ui/}              & ui.R --- full Shiny UI (11 tabs) \\
+\texttt{R/server/}          & server\_init.R, server\_validation.R, server\_learning.R, server\_misc.R \\
+\texttt{pipelines/}         & pipeline\_telegram.R/py, pipeline\_youtube.R, pipeline\_keywords.R \\
+\texttt{Supabase}           & pipeline\_telegram, pipeline\_youtube, keyword\_bank tables \\
+\texttt{SQLite}             & cases, keyword\_weights, examples, disagreements, forecast\_log, officer\_agreement \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+
+\noindent\colorbox{ncicblue}{\parbox{\textwidth}{\vspace{3pt}\hspace{6pt}\textbf{\textcolor{white}{\large 9\quad Target Users, Outcomes \& Value Proposition}}\vspace{3pt}}}
+
+\vspace{0.3em}
+
+\noindent\begin{minipage}[t]{0.46\textwidth}
+\small\textbf{\textcolor{ncicblue}{Target Users}}\\[3pt]
+\begin{tabular}{@{}p{2.6cm}p{3.5cm}@{}}
+\toprule
+\textbf{User Group} & \textbf{Primary Use} \\
+\midrule
+NCIC Officers      & Validate, escalate, act \\
+Govt Analysts      & Strategic oversight \\
+Security Agencies  & Operational coordination \\
+Researchers / CSOs & Evidence-based advocacy \\
+\bottomrule
+\end{tabular}\\[6pt]
+\small\textbf{\textcolor{ncicblue}{Supporting Institutions (Proposed)}}
+\begin{itemize}[leftmargin=10pt, itemsep=1pt, topsep=2pt]
+  \small\item National Intelligence Service (NIS)
+  \item Anti-Terrorism Police Unit (ATPU)
+  \item Communications Authority of Kenya
+  \item National Intelligence \& Research University (NIRU)
+  \item United Nations Development Programme (UNDP)
+\end{itemize}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.50\textwidth}
+\small\textbf{\textcolor{ncicblue}{Expected Outcomes}}
+\begin{itemize}[leftmargin=10pt, itemsep=2pt, topsep=2pt]
+  \small\item Early detection of harmful narratives before escalation
+  \item County and sub-county hotspot identification
+  \item 14-day forecast with election-cycle awareness (2027 ready)
+  \item Improved inter-agency coordination via structured evidence
+  \item Data-driven policy formulation and cohesion capacity
+  \item Measurable system quality via precision, recall, and MAE
+\end{itemize}
+\vspace{0.3em}
+\begin{tcolorbox}[enhanced, colback=ncicpurple!8, colframe=ncicpurple, arc=4pt, boxrule=0.8pt, left=8pt, right=8pt, top=6pt, bottom=6pt]
+\small\textbf{\textcolor{ncicpurple}{Value Proposition}}\\[3pt]
+This platform enables Kenya to shift from \textbf{reactive response} to \textbf{proactive, geographically targeted prevention} --- using AI to support national action within a legal, human-rights-compliant framework anchored in Cap 170. Every consequential output carries a human officer's name, timestamp, and decision.
+\end{tcolorbox}
+\end{minipage}
+
+\vspace{0.8em}
+
+\begin{tcolorbox}[enhanced, colback=ncicdark, colframe=ncicblue, arc=4pt, boxrule=0.8pt, left=10pt, right=10pt, top=6pt, bottom=6pt]
+\begin{center}
+\small\textcolor{white}{\textbf{Noah Wamalwa} \textbullet\ Project Lead / Developer}\\[2pt]
+\small\textcolor{ncicblue!80!white}{Radicalisation Signals v6 \textbullet\ NCIC Cap 170 \textbullet\ GPT-4o-mini + HITL \textbullet\ Prophet Forecast \textbullet\ 47 Counties \textbullet\ Kenya}\\[1pt]
+\small\textcolor{white!55!ncicdark}{Adaptive keyword bank \textbullet\ Election regressor \textbullet\ Cohen's \(\kappa\) \textbullet\ Forecast accuracy log \textbullet\ Modular architecture}\\[3pt]
+\small\textcolor{ncicblue!70!white}{\textit{Developed for the IEA Kenya NIRU AI Hackathon \textbullet\ `r format(Sys.Date(), '%B %Y')`}}
+\end{center}
+\end{tcolorbox}

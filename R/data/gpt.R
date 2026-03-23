@@ -571,8 +571,34 @@ build_language_hint <- function(lang_det, text) {
 #                 prophet_used (bool), forecast_df (future 14d), hist_df
 
 FORECAST_DAYS   <- 14L
-FORECAST_WINDOW <- 30L   # days of history used for training
-MIN_PROPHET_OBS <- 7L    # minimum daily obs needed to fit Prophet
+FORECAST_WINDOW <- 90L   # FIX 1: increased from 30 → 90 days for reliable seasonality
+MIN_PROPHET_OBS <- 14L   # FIX 3: increased from 7 → 14; require 3 distinct weeks minimum
+MIN_PROPHET_WEEKS <- 3L  # FIX 3: must span at least 3 calendar weeks
+
+# ── Kenya election calendar ───────────────────────────────────────
+# FIX 4: election proximity regressor
+# General elections every 5 years on 2nd Tuesday of August
+# Next: 12 Aug 2027. Add more as needed.
+KENYA_ELECTIONS <- as.Date(c(
+  "2007-12-27",  # post-election violence reference
+  "2013-03-04",
+  "2017-08-08",
+  "2022-08-09",
+  "2027-08-10"   # projected
+))
+
+days_to_next_election <- function(date) {
+  future <- KENYA_ELECTIONS[KENYA_ELECTIONS >= as.Date(date)]
+  if (length(future) == 0) return(365L)   # no upcoming election on record
+  as.integer(min(future) - as.Date(date))
+}
+
+election_proximity_score <- function(days) {
+  # Returns 0–1: 1.0 = election day, 0 = >180 days away
+  if (days <= 0)   return(1.0)
+  if (days >= 180) return(0.0)
+  round(1 - days / 180, 3)
+}
 
 run_prophet_forecast <- function(cases_df, county_name, now = Sys.time()) {
   cutoff  <- now - as.difftime(FORECAST_WINDOW, units = "days")
@@ -598,73 +624,105 @@ run_prophet_forecast <- function(cases_df, county_name, now = Sys.time()) {
   trend        <- 0L
   
   if (n_recent >= MIN_PROPHET_OBS) {
+    # FIX 5: use daily MAX not mean — preserves spike information
     daily <- h |>
       mutate(ds = as.Date(timestamp)) |>
       group_by(ds) |>
-      summarise(y = mean(risk_score, na.rm=TRUE), .groups="drop") |>
+      summarise(
+        y          = max(risk_score, na.rm = TRUE),   # FIX 5: was mean()
+        spike_count = n(),                             # FIX 5: track burst volume
+        .groups    = "drop"
+      ) |>
       arrange(ds)
-    
-    # Need at least MIN_PROPHET_OBS distinct days
-    if (nrow(daily) >= MIN_PROPHET_OBS) {
+
+    # FIX 3: require at least MIN_PROPHET_OBS distinct days AND MIN_PROPHET_WEEKS weeks
+    n_distinct_weeks <- length(unique(format(daily$ds, "%Y-%W")))
+    if (nrow(daily) >= MIN_PROPHET_OBS && n_distinct_weeks >= MIN_PROPHET_WEEKS) {
       prophet_used <- TRUE
-      
+
+      # FIX 4: build election proximity regressor for each historical day
+      daily$election_proximity <- sapply(
+        daily$ds, function(d) election_proximity_score(days_to_next_election(d)))
+
       m <- tryCatch({
-        prophet(
+        m0 <- prophet(
           daily,
           daily.seasonality  = FALSE,
           weekly.seasonality = TRUE,
           yearly.seasonality = FALSE,
           seasonality.mode   = "additive",
-          changepoint.prior.scale = 0.15,   # moderate flexibility
+          changepoint.prior.scale = 0.15,
           interval.width     = 0.80,
           verbose            = FALSE
         )
+        # FIX 4: add election proximity as external regressor
+        m0 <- add_regressor(m0, "election_proximity")
+        fit.prophet(m0, daily)
       }, error = function(e) NULL)
-      
+
       if (!is.null(m)) {
-        future_df   <- make_future_dataframe(m, periods = FORECAST_DAYS, freq = "day")
+        # FIX 4: build future dataframe with election proximity regressor
+        future_df <- make_future_dataframe(m, periods = FORECAST_DAYS, freq = "day")
+        future_df$election_proximity <- sapply(
+          future_df$ds, function(d) election_proximity_score(days_to_next_election(d)))
+
         forecast_df <- predict(m, future_df)
-        
+
         # Historical actuals (for chart)
         hist_df <- daily
-        
-        # Escalation score = capped mean of Prophet's upper-bound forecast
-        # for the next 14 days, normalised to 0–100
+
+        # FIX 2: use yhat (point estimate) for escalation score
+        # Separately flag worst-case when yhat_upper > 70
         fc_next <- forecast_df[forecast_df$ds > as.Date(now), ]
         if (nrow(fc_next) > 0) {
-          # Use yhat_upper for a conservative worst-case view
-          raw_score        <- mean(fc_next$yhat_upper, na.rm=TRUE)
+          raw_score        <- mean(fc_next$yhat, na.rm = TRUE)         # FIX 2: was yhat_upper
           escalation_score <- min(100L, max(0L, round(raw_score)))
+          worst_case_flag  <- any(fc_next$yhat_upper > 70, na.rm = TRUE)  # FIX 2: separate flag
         } else {
           escalation_score <- min(100L, avg_risk)
+          worst_case_flag  <- FALSE
         }
-        
-        # Trend: slope over forecast period vs last 7d actuals
-        last7   <- daily[daily$ds >= as.Date(now) - 7, ]
-        risk_w1 <- if (nrow(last7) > 0) mean(last7$y, na.rm=TRUE) else NA
-        risk_w2 <- mean(daily$y[seq_len(max(1, nrow(daily)-7))], na.rm=TRUE)
-        trend   <- if (!is.na(risk_w1) && risk_w2 > 0)
-          round((risk_w1 - risk_w2) / risk_w2 * 100, 0) else 0L
-        
+
+        # FIX 2: use Prophet's built-in trend component — not fragile w2/w1 division
+        trend_component <- forecast_df$trend
+        n_hist          <- sum(forecast_df$ds <= as.Date(now))
+        n_fut           <- sum(forecast_df$ds > as.Date(now))
+        if (n_hist >= 2 && n_fut >= 1) {
+          trend_start <- mean(tail(trend_component[seq_len(n_hist)], 7), na.rm = TRUE)
+          trend_end   <- mean(head(trend_component[(n_hist+1):length(trend_component)], 7), na.rm = TRUE)
+          trend <- if (trend_start > 0)
+            round((trend_end - trend_start) / trend_start * 100, 0)
+          else 0L
+        } else {
+          trend <- 0L
+        }
+
       } else {
-        prophet_used <- FALSE   # model failed — fall through to heuristic
+        prophet_used    <- FALSE
+        worst_case_flag <- FALSE
       }
     }
   }
   
   # ── Heuristic fallback (when Prophet can't fit) ───────────────
   if (!prophet_used) {
+    worst_case_flag <- FALSE
     w1 <- h[h$timestamp >= now - as.difftime(7,  units="days"), ]
     w2 <- h[h$timestamp >= now - as.difftime(14, units="days") &
               h$timestamp <  now - as.difftime(7,  units="days"), ]
-    risk_w1  <- if (nrow(w1) > 0) mean(w1$risk_score, na.rm=TRUE) else NA
-    risk_w2  <- if (nrow(w2) > 0) mean(w2$risk_score, na.rm=TRUE) else NA
+    # FIX 5: use max not mean for spike detection
+    risk_w1  <- if (nrow(w1) > 0) max(w1$risk_score, na.rm=TRUE) else NA
+    risk_w2  <- if (nrow(w2) > 0) max(w2$risk_score, na.rm=TRUE) else NA
+    # FIX 2: guard against w2 = 0 or NA
     trend    <- if (!is.na(risk_w1) && !is.na(risk_w2) && risk_w2 > 0)
       round((risk_w1 - risk_w2) / risk_w2 * 100, 0) else 0L
     velocity <- if (nrow(w1) > 0) round(nrow(w1) / 7, 1) else 0
+    # FIX 4: add election proximity boost to heuristic score
+    el_prox  <- election_proximity_score(days_to_next_election(now))
     escalation_score <- min(100L, round(
       avg_risk * 0.35 + avg_ncic * 8 + n_high * 3 +
-        max(0, trend) * 0.5 + velocity * 4))
+        max(0, trend) * 0.5 + velocity * 4 +
+        el_prox * 15))   # up to +15 points in election window
   }
   
   # ── Forecast level ────────────────────────────────────────────
@@ -673,16 +731,54 @@ run_prophet_forecast <- function(cases_df, county_name, now = Sys.time()) {
   else if (escalation_score >= 30) "ELEVATED"
   else if (escalation_score >  0)  "MONITORED"
   else                             "STABLE"
-  
+
+  # ── Election proximity ────────────────────────────────────────
+  el_days  <- days_to_next_election(now)
+  el_prox  <- election_proximity_score(el_days)
+  el_label <- if (el_days <= 30)  paste0("Election in ", el_days, "d — HIGH RISK WINDOW") else
+              if (el_days <= 90)  paste0("Election in ", el_days, "d — ELEVATED WATCH")   else
+              if (el_days <= 180) paste0("Election in ", el_days, "d — MONITOR")           else NULL
+
   # ── Key drivers ───────────────────────────────────────────────
   drivers <- c(
-    if (prophet_used)    "Prophet time-series model"      else "Heuristic (insufficient data)",
-    if (avg_ncic >= 3.5) "High avg NCIC level"            else NULL,
-    if (n_high   >= 3)   paste0(n_high, " L4+ cases")     else NULL,
-    if (trend    > 20)   paste0("↑", trend, "% trend")    else NULL,
-    if (n_s13    > 0)    paste0(n_s13, " S13 cases")      else NULL
+    if (prophet_used)         "Prophet time-series (90d)" else "Heuristic (insufficient data)",
+    if (isTRUE(worst_case_flag)) "WORST-CASE: yhat_upper > 70" else NULL,
+    if (avg_ncic >= 3.5)      "High avg NCIC level"            else NULL,
+    if (n_high   >= 3)        paste0(n_high, " L4+ cases")     else NULL,
+    if (trend    > 20)        paste0("\u2191", trend, "% trend")   else NULL,
+    if (n_s13    > 0)         paste0(n_s13, " S13 cases")      else NULL,
+    el_label
   )
-  
+
+  # ── FIX 5: Save forecast to SQLite for accuracy tracking ──────
+  tryCatch({
+    con <- db_connect(); on.exit(dbDisconnect(con), add = TRUE)
+    dbExecute(con,
+      "CREATE TABLE IF NOT EXISTS forecast_log (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         county TEXT, run_at TEXT,
+         escalation_score INTEGER, forecast_level TEXT,
+         prophet_used INTEGER, worst_case INTEGER,
+         election_proximity REAL, trend INTEGER,
+         n_recent INTEGER, actual_score INTEGER, mae REAL,
+         evaluated_at TEXT)",
+    )
+    dbExecute(con,
+      "INSERT INTO forecast_log
+       (county,run_at,escalation_score,forecast_level,
+        prophet_used,worst_case,election_proximity,trend,n_recent)
+       VALUES (?,?,?,?,?,?,?,?,?)",
+      list(county_name,
+           format(now, "%Y-%m-%d %H:%M:%S"),
+           as.integer(escalation_score),
+           forecast_level,
+           as.integer(prophet_used),
+           as.integer(isTRUE(worst_case_flag)),
+           round(el_prox, 3),
+           as.integer(trend),
+           as.integer(n_recent)))
+  }, error = function(e) NULL)  # never crash the forecast on log failure
+
   list(
     county           = county_name,
     n_recent         = n_recent,
@@ -695,7 +791,10 @@ run_prophet_forecast <- function(cases_df, county_name, now = Sys.time()) {
     top_category     = top_category,
     escalation_score = escalation_score,
     forecast_level   = forecast_level,
-    drivers          = paste(drivers, collapse = " · "),
+    worst_case_flag  = isTRUE(worst_case_flag),
+    election_days    = el_days,
+    election_prox    = el_prox,
+    drivers          = paste(drivers[!is.null(drivers)], collapse = " · "),
     prophet_used     = prophet_used,
     hist_df          = hist_df,
     forecast_df      = forecast_df
@@ -712,6 +811,9 @@ build_county_forecasts <- function(cases_df, now = Sys.time()) {
         list(county=co, n_recent=0, avg_risk=0, avg_ncic=0, n_high=0,
              n_s13=0, trend=0, top_platform="—", top_category="—",
              escalation_score=0, forecast_level="STABLE",
+             worst_case_flag=FALSE,
+             election_days=days_to_next_election(now),
+             election_prox=election_proximity_score(days_to_next_election(now)),
              drivers="Model error", prophet_used=FALSE,
              hist_df=NULL, forecast_df=NULL)
       }

@@ -44,7 +44,7 @@
   "shiny","bslib","bsicons","leaflet","leaflet.extras2",
   "DT","dplyr","writexl","httr2","jsonlite","shinyjs",
   "digest","future","promises","plotly","later","highcharter",
-  "sf","tmap","tools","DBI","RSQLite","bcrypt","prophet"
+  "sf","tmap","tools","bcrypt","prophet"
 )
 .missing <- .required_pkgs[!sapply(.required_pkgs, requireNamespace, quietly=TRUE)]
 if (length(.missing) > 0) {
@@ -56,6 +56,7 @@ if (length(.missing) > 0) {
 rm(.required_pkgs, .missing)
 
 readRenviron("secrets/.Renviron")
+source("supabase_db.R")
 
 library(shiny);    library(bslib);      library(bsicons)
 library(leaflet);  library(leaflet.extras2)
@@ -64,7 +65,7 @@ library(httr2);    library(jsonlite);   library(shinyjs)
 library(digest);   library(future);     library(promises)
 library(plotly);   library(later);      library(highcharter)
 library(sf);       library(tmap)
-library(DBI);      library(RSQLite);    library(bcrypt)
+library(bcrypt)
 library(prophet)
 
 plan(multisession)
@@ -132,620 +133,11 @@ ncic_s13     <- function(lvl) isTRUE(NCIC_SECTION13[as.character(lvl)])
 # ── SQLite DATABASE LAYER ─────────────────────────────────────────
 if (!dir.exists(CACHE_DIR)) dir.create(CACHE_DIR, recursive=TRUE)
 
-db_connect <- function() {
-  con <- dbConnect(RSQLite::SQLite(), DB_FILE)
-  dbExecute(con, "PRAGMA journal_mode=WAL;")   # concurrent reads without locking
-  con
-}
-
-db_init <- function() {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS cases (",
-    "case_id TEXT PRIMARY KEY, county TEXT, sub_location TEXT,",
-    "src_lat REAL, src_lng REAL, target_county TEXT, tgt_lat REAL, tgt_lng REAL,",
-    "target_group TEXT, platform TEXT, handle TEXT, tweet_text TEXT, language TEXT,",
-    "ncic_level INTEGER, ncic_label TEXT, section_13 INTEGER, confidence TEXT,",
-    "conf_num INTEGER, conf_band TEXT, category TEXT,",
-    "validated_by TEXT, validated_at TEXT, action_taken TEXT,",
-    "officer_ncic_override INTEGER, risk_score INTEGER, risk_level TEXT,",
-    "risk_formula TEXT, kw_score INTEGER, network_score INTEGER,",
-    "signals TEXT, trend_data TEXT, timestamp TEXT, timestamp_chr TEXT,",
-    "notes TEXT DEFAULT '')"))
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS keyword_weights (",
-    "keyword TEXT PRIMARY KEY, weight REAL)"))
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS examples (",
-    "id INTEGER PRIMARY KEY AUTOINCREMENT, tweet TEXT, ncic_level TEXT,",
-    "category TEXT, reasoning TEXT, outcome TEXT, ts TEXT)"))
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS disagreements (",
-    "id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, officer TEXT,",
-    "case_id TEXT, tweet TEXT, gpt_level INTEGER, officer_level INTEGER)"))
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS api_failures (",
-    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
-    "case_id TEXT, tweet_text TEXT, error_msg TEXT, ",
-    "attempt INTEGER DEFAULT 1, ts TEXT, resolved INTEGER DEFAULT 0)"))
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS officers (",
-    "username TEXT PRIMARY KEY, ",
-    "password_hash TEXT NOT NULL, ",
-    "role TEXT DEFAULT 'officer', ",
-    "active INTEGER DEFAULT 1, ",
-    "created_at TEXT)"))
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS s13_queue (",
-    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
-    "case_id TEXT NOT NULL, ",
-    "county TEXT, platform TEXT, tweet_text TEXT, ",
-    "ncic_level INTEGER, risk_score INTEGER, ",
-    "target_group TEXT, validated_by TEXT, validated_at TEXT, ",
-    "status TEXT DEFAULT 'PENDING', ",   # PENDING | FILED | DCI_ALERTED | RESOLVED
-    "dci_ref TEXT, ",                    # DCI reference number when filed
-    "notes TEXT, ",
-    "created_at TEXT, updated_at TEXT)"))
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS audit_log (",
-    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
-    "ts TEXT NOT NULL, ",
-    "officer TEXT NOT NULL, ",
-    "officer_name TEXT, ",
-    "action TEXT NOT NULL, ",
-    "case_id TEXT, ",
-    "detail TEXT, ",
-    "session_id TEXT)"))
-
-  # ── v6 tables ────────────────────────────────────────────────
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS gold_standard (",
-    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
-    "tweet_text TEXT NOT NULL, ",
-    "true_level INTEGER NOT NULL, ",
-    "labelled_by TEXT NOT NULL, ",
-    "labelled_at TEXT, ",
-    "second_label INTEGER, ",
-    "second_labelled_by TEXT, ",
-    "agreed INTEGER DEFAULT 0, ",
-    "notes TEXT DEFAULT '')"))
-
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS eval_runs (",
-    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
-    "run_at TEXT NOT NULL, ",
-    "n_total INTEGER, ",
-    "n_correct INTEGER, ",
-    "precision_score REAL, ",
-    "recall_score REAL, ",
-    "f1_score REAL, ",
-    "threshold INTEGER, ",
-    "run_by TEXT)"))
-
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS officer_agreement (",
-    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
-    "case_id TEXT NOT NULL, ",
-    "officer_a TEXT, level_a INTEGER, ",
-    "officer_b TEXT, level_b INTEGER, ",
-    "level_delta INTEGER, ",
-    "flagged INTEGER DEFAULT 0, ",
-    "adjudicated_by TEXT, ",
-    "final_level INTEGER, ",
-    "ts TEXT)"))
-
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS confidence_calibration (",
-    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
-    "conf_bucket INTEGER, ",
-    "n_total INTEGER DEFAULT 0, ",
-    "n_correct INTEGER DEFAULT 0, ",
-    "accuracy REAL, ",
-    "updated_at TEXT)"))
-
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS keyword_retirements (",
-    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
-    "keyword TEXT NOT NULL, ",
-    "tier INTEGER, category TEXT, language TEXT, ",
-    "retired_by TEXT, retired_at TEXT, ",
-    "reason TEXT, times_matched INTEGER DEFAULT 0)"))
-
-  dbExecute(con, paste0(
-    "CREATE TABLE IF NOT EXISTS keyword_changelog (",
-    "id INTEGER PRIMARY KEY AUTOINCREMENT, ",
-    "keyword TEXT NOT NULL, ",
-    "action TEXT NOT NULL, ",
-    "old_tier INTEGER, new_tier INTEGER, ",
-    "old_status TEXT, new_status TEXT, ",
-    "changed_by TEXT, changed_at TEXT, ",
-    "reason TEXT DEFAULT '')"))
-
-  message("[db] SQLite initialised at ", DB_FILE)
-}
-
-# ── Officer auth helpers ─────────────────────────────────────────
-# Seed a default admin on first run from .Renviron:
-#   ADMIN_USERNAME=admin
-#   ADMIN_PASSWORD=<your-strong-password>
-# Never hardcode credentials in app.R.
-db_seed_admin <- function() {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  existing <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM officers")$n
-  if (existing > 0) return(invisible(NULL))   # already seeded
-  
-  u <- Sys.getenv("ADMIN_USERNAME")
-  p <- Sys.getenv("ADMIN_PASSWORD")
-  if (nchar(u) == 0 || nchar(p) == 0) {
-    warning("[auth] ADMIN_USERNAME / ADMIN_PASSWORD not set in .Renviron — no officers seeded. ",
-            "Run setup_officers.R to add officers before deploying.")
-    return(invisible(NULL))
-  }
-  hashed <- bcrypt::hashpw(p)
-  dbExecute(con,
-            "INSERT INTO officers (username, password_hash, role, active, created_at) VALUES (?,?,?,1,?)",
-            list(u, hashed, "admin", format(Sys.time(), "%Y-%m-%d %H:%M:%S")))
-  message(sprintf("[auth] Default admin '%s' seeded from .Renviron", u))
-}
-
-db_check_password <- function(username, password) {
-  # Returns list(ok, role) — timing-safe via bcrypt::checkpw
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  row <- dbGetQuery(con,
-                    "SELECT password_hash, role, active FROM officers WHERE username = ?",
-                    list(trimws(tolower(username))))
-  if (nrow(row) == 0 || row$active[1] != 1L)
-    return(list(ok=FALSE, role=NA_character_))
-  ok <- tryCatch(bcrypt::checkpw(password, row$password_hash[1]),
-                 error = function(e) FALSE)
-  list(ok=ok, role=if(ok) row$role[1] else NA_character_)
-}
-
-# ── Password strength checker (mirrors setup_officers.R rules) ───
-check_pw_strength <- function(password, username) {
-  errs <- c()
-  if (nchar(password) < 10)
-    errs <- c(errs, "At least 10 characters required")
-  if (!grepl("[A-Z]", password))
-    errs <- c(errs, "At least one uppercase letter required")
-  if (!grepl("[a-z]", password))
-    errs <- c(errs, "At least one lowercase letter required")
-  if (!grepl("[0-9]", password))
-    errs <- c(errs, "At least one digit required")
-  if (!grepl("[^A-Za-z0-9]", password))
-    errs <- c(errs, "At least one special character required (e.g. ! @ # $)")
-  if (tolower(password) == tolower(username))
-    errs <- c(errs, "Password must not match the username")
-  if (grepl("password|ncic|admin|officer|intel|kenya", tolower(password)))
-    errs <- c(errs, "Password contains a common word — choose something unique")
-  errs
-}
-
-db_add_officer <- function(username, password, role="officer") {
-  errs <- check_pw_strength(password, username)
-  if (length(errs) > 0)
-    stop(paste("Password rejected:", paste(errs, collapse="; ")))
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  hashed <- bcrypt::hashpw(password)
-  dbExecute(con,
-            "INSERT OR REPLACE INTO officers (username, password_hash, role, active, created_at) VALUES (?,?,?,1,?)",
-            list(trimws(tolower(username)), hashed, role, format(Sys.time(), "%Y-%m-%d %H:%M:%S")))
-  message(sprintf("[auth] Officer '%s' (role: %s) added/updated", username, role))
-}
-
-db_deactivate_officer <- function(username) {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  dbExecute(con, "UPDATE officers SET active=0 WHERE username=?",
-            list(trimws(tolower(username))))
-  message(sprintf("[auth] Officer '%s' deactivated", username))
-}
-
-# ── Audit log helpers ────────────────────────────────────────────
-audit <- function(officer, officer_name, action, case_id=NA, detail=NA, session_id=NA) {
-  tryCatch({
-    con <- db_connect(); on.exit(dbDisconnect(con))
-    dbExecute(con,
-              "INSERT INTO audit_log (ts, officer, officer_name, action, case_id, detail, session_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)",
-              list(format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-                   as.character(officer %||% "unknown"),
-                   as.character(officer_name %||% ""),
-                   as.character(action),
-                   if (is.na(case_id))  NA_character_ else as.character(case_id),
-                   if (is.na(detail))   NA_character_ else as.character(detail),
-                   if (is.na(session_id)) NA_character_ else as.character(session_id)))
-  }, error = function(e) message("[audit] log failed: ", e$message))
-}
-
-db_load_audit <- function(limit=500) {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  tryCatch(
-    dbGetQuery(con, sprintf(
-      "SELECT id, ts, officer, officer_name, action, case_id, detail
-       FROM audit_log ORDER BY id DESC LIMIT %d", as.integer(limit))),
-    error = function(e) data.frame()
-  )
-}
-
-db_load_officers <- function() {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  tryCatch(
-    dbGetQuery(con,
-               "SELECT username, role, active, created_at FROM officers ORDER BY created_at"),
-    error = function(e) data.frame()
-  )
-}
-
-# ── S13 Escalation Queue helpers ─────────────────────────────────
-db_s13_enqueue <- function(case_row, officer) {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  existing <- dbGetQuery(con,
-                         "SELECT id FROM s13_queue WHERE case_id=?", list(case_row$case_id))
-  if (nrow(existing) > 0) return(invisible(FALSE))  # already queued
-  now <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
-  dbExecute(con,
-            "INSERT INTO s13_queue
-     (case_id,county,platform,tweet_text,ncic_level,risk_score,
-      target_group,validated_by,validated_at,status,created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            list(case_row$case_id, case_row$county, case_row$platform,
-                 substr(case_row$tweet_text,1,200),
-                 case_row$ncic_level, case_row$risk_score,
-                 case_row$target_group %||% "", officer,
-                 format(Sys.time(),"%Y-%m-%d %H:%M"),
-                 "PENDING", now, now))
-  invisible(TRUE)
-}
-
-db_s13_update_status <- function(id, status, dci_ref=NA, notes=NA) {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  dbExecute(con,
-            "UPDATE s13_queue SET status=?, dci_ref=?, notes=?, updated_at=? WHERE id=?",
-            list(status,
-                 if (is.na(dci_ref)) NA_character_ else dci_ref,
-                 if (is.na(notes))   NA_character_ else notes,
-                 format(Sys.time(), "%Y-%m-%d %H:%M:%S"), as.integer(id)))
-}
-
-db_s13_load <- function() {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  tryCatch(
-    dbGetQuery(con,
-               "SELECT * FROM s13_queue ORDER BY
-       CASE status WHEN 'PENDING' THEN 0 WHEN 'FILED' THEN 1
-                   WHEN 'DCI_ALERTED' THEN 2 ELSE 3 END,
-       ncic_level DESC, risk_score DESC"),
-    error = function(e) data.frame()
-  )
-}
-
-db_init()
-db_seed_admin()
-
-# ── S13 queue backfill ───────────────────────────────────────────
-# On startup, any validated L4/L5 case not already in s13_queue
-# is automatically enqueued so the queue is never empty after deploy.
-db_s13_backfill <- function() {
-  tryCatch({
-    con <- db_connect(); on.exit(dbDisconnect(con))
-    # Get all validated high-severity cases not yet in queue
-    existing <- dbGetQuery(con, "SELECT case_id FROM s13_queue")$case_id
-    cases    <- dbGetQuery(con,
-      "SELECT * FROM cases WHERE ncic_level >= 4 AND validated_by IS NOT NULL")
-    if (nrow(cases) == 0) return(invisible(NULL))
-    new_cases <- cases[!cases$case_id %in% existing, ]
-    if (nrow(new_cases) == 0) return(invisible(NULL))
-    for (i in seq_len(nrow(new_cases))) {
-      row <- new_cases[i, ]
-      dbExecute(con,
-        paste0("INSERT OR IGNORE INTO s13_queue ",
-               "(case_id,county,platform,tweet_text,ncic_level,risk_score,",
-               "target_group,validated_by,validated_at,status,created_at,updated_at) ",
-               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"),
-        list(row$case_id,
-             row$county    %||% "Unknown",
-             row$platform  %||% "Unknown",
-             substr(row$tweet_text %||% "", 1, 500),
-             as.integer(row$ncic_level),
-             as.integer(row$risk_score %||% 0L),
-             row$target_group %||% "",
-             row$validated_by %||% "system",
-             row$validated_at %||% format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-             "PENDING",
-             format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-             format(Sys.time(), "%Y-%m-%d %H:%M:%S")))
-    }
-    n <- nrow(new_cases)
-    if (n > 0) message(sprintf("[startup] S13 backfill: %d case(s) added to queue", n))
-  }, error = function(e) message("[startup] S13 backfill error: ", e$message))
-}
-db_s13_backfill()
-
+# ── DATABASE LAYER (Supabase) ───────────────────────────────────
+# All db_* functions are defined in supabase_db.R
+# source() is called at startup after readRenviron()
 # ── Cases ────────────────────────────────────────────────────────
-db_load_cases <- function() {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  d <- dbReadTable(con, "cases")
-  if (nrow(d) == 0) return(NULL)
-  d$timestamp  <- as.POSIXct(d$timestamp, tz="Africa/Nairobi")
-  d$section_13 <- as.logical(d$section_13)
-  d
-}
-
-db_save_cases <- function(df) {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  dbWithTransaction(con, {
-    dbExecute(con, "DELETE FROM cases")
-    dw <- df
-    dw$timestamp  <- format(df$timestamp, "%Y-%m-%d %H:%M:%S")
-    dw$section_13 <- as.integer(df$section_13)
-    dbWriteTable(con, "cases", dw, append=TRUE)
-  })
-  invisible(TRUE)
-}
-
-db_update_case <- function(case_id, fields) {
-  # Atomic update of specific fields for one case — used during validation
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  cols <- names(fields)
-  set_sql <- paste(sprintf('"%s" = :%s', cols, cols), collapse=", ")
-  sql <- sprintf('UPDATE cases SET %s WHERE case_id = :dot_cid', set_sql)
-  dbExecute(con, sql, params=c(fields, list(dot_cid=case_id)))
-}
-
-# ── API Failure Queue ────────────────────────────────────────────
-db_log_failure <- function(case_id, tweet_text, error_msg, attempt=1L) {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  dbExecute(con,
-            "INSERT INTO api_failures (case_id,tweet_text,error_msg,attempt,ts,resolved) VALUES (:case_id,:tweet,:err,:attempt,:ts,0)",
-            params=list(case_id=case_id, tweet=substr(tweet_text,1,100),
-                        err=substr(error_msg,1,200), attempt=as.integer(attempt),
-                        ts=format(Sys.time(),"%Y-%m-%d %H:%M:%S")))
-}
-
-db_resolve_failure <- function(case_id) {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  dbExecute(con, "UPDATE api_failures SET resolved=1 WHERE case_id=:cid AND resolved=0",
-            params=list(cid=case_id))
-}
-
-db_load_failures <- function(unresolved_only=TRUE) {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  sql <- if (unresolved_only)
-    "SELECT * FROM api_failures WHERE resolved=0 ORDER BY ts DESC"
-  else
-    "SELECT * FROM api_failures ORDER BY ts DESC LIMIT 100"
-  tryCatch(dbGetQuery(con, sql),
-           error=function(e) data.frame())
-}
-
-db_clear_failures <- function() {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  dbExecute(con, "UPDATE api_failures SET resolved=1")
-}
-
-# ── Keyword weights ──────────────────────────────────────────────
-db_load_weights <- function() {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  d <- dbReadTable(con, "keyword_weights")
-  if (nrow(d) == 0) return(NULL)
-  as.list(setNames(d$weight, d$keyword))
-}
-
-db_save_weights <- function(w) {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  dbWithTransaction(con, {
-    dbExecute(con, "DELETE FROM keyword_weights")
-    dbWriteTable(con, "keyword_weights",
-                 data.frame(keyword=names(w), weight=unlist(w),
-                            stringsAsFactors=FALSE), append=TRUE)
-  })
-  invisible(TRUE)
-}
-
-# ── Examples (few-shot bank) ─────────────────────────────────────
-load_examples <- function() {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  d <- dbReadTable(con, "examples")
-  if (nrow(d) == 0) return(list())
-  lapply(seq_len(nrow(d)), function(i)
-    list(tweet=d$tweet[i], ncic_level=d$ncic_level[i],
-         category=d$category[i], reasoning=d$reasoning[i],
-         outcome=d$outcome[i], ts=as.POSIXct(d$ts[i])))
-}
-
-save_examples <- function(ex) invisible(NULL)  # legacy stub
-
-add_example <- function(tweet, ncic_level, category, reasoning, outcome) {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  dbExecute(con,
-            "INSERT INTO examples (tweet,ncic_level,category,reasoning,outcome,ts) VALUES (:tweet,:ncic_level,:category,:reasoning,:outcome,:ts)",
-            params=list(tweet=tweet, ncic_level=as.character(ncic_level),
-                        category=category %||% "", reasoning=reasoning %||% "",
-                        outcome=outcome, ts=format(Sys.time(),"%Y-%m-%d %H:%M:%S")))
-}
-
-# ── Disagreements ────────────────────────────────────────────────
-load_disagreements <- function() {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  d <- dbReadTable(con, "disagreements")
-  if (nrow(d) == 0)
-    return(data.frame(ts=character(), officer=character(), case_id=character(),
-                      tweet=character(), gpt_level=integer(), officer_level=integer(),
-                      stringsAsFactors=FALSE))
-  d[, c("ts","officer","case_id","tweet","gpt_level","officer_level")]
-}
-
-log_disagreement <- function(officer, case_id, tweet, gpt_lvl, off_lvl) {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  dbExecute(con,
-            "INSERT INTO disagreements (ts,officer,case_id,tweet,gpt_level,officer_level) VALUES (:ts,:officer,:case_id,:tweet,:gpt_level,:officer_level)",
-            params=list(ts=format(Sys.time(),"%Y-%m-%d %H:%M"), officer=officer,
-                        case_id=case_id, tweet=substr(tweet,1,80),
-                        gpt_level=as.integer(gpt_lvl), officer_level=as.integer(off_lvl)))
-}
-
-# ── ADAPTIVE KEYWORD WEIGHTS ─────────────────────────────────────
-DEFAULT_KEYWORD_WEIGHTS <- list(
-  "kabila"=30,"waende"=35,"hawastahili"=30,"migrants"=25,
-  "extremists"=28,"tutawaonyesha"=40,"wezi"=32,"nguvu"=28,
-  "never be trusted"=35,"go back"=30,"cockroach"=50,
-  "vermin"=50,"funga"=28,"waondoke"=38,"sisi na wao"=32,
-  "damu"=30,"piga"=35,"chinja"=45,"angamiza"=48
-)
-
-kw_weights_global <- db_load_weights() %||% DEFAULT_KEYWORD_WEIGHTS
-
-save_kw_weights <- function(w) {
-  db_save_weights(w)
-}
-
-# ── v6: GOLD STANDARD & EVALUATION ───────────────────────────────
-db_add_gold <- function(tweet, true_level, officer, notes = "") {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  dbExecute(con,
-    "INSERT OR IGNORE INTO gold_standard (tweet_text,true_level,labelled_by,labelled_at,notes) VALUES (?,?,?,?,?)",
-    list(substr(tweet,1,500), as.integer(true_level), officer,
-         format(Sys.time(),"%Y-%m-%d %H:%M:%S"), notes))
-}
-
-db_load_gold <- function() {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  tryCatch(dbReadTable(con,"gold_standard"), error=function(e) data.frame())
-}
-
-db_load_eval_runs <- function() {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  tryCatch(dbGetQuery(con,"SELECT * FROM eval_runs ORDER BY run_at DESC LIMIT 20"),
-           error=function(e) data.frame())
-}
-
-run_evaluation <- function(gold_df, threshold=3L, officer="system") {
-  if (nrow(gold_df) == 0) return(NULL)
-  results <- lapply(seq_len(nrow(gold_df)), function(i) {
-    tweet      <- gold_df$tweet_text[i]
-    true_level <- as.integer(gold_df$true_level[i])
-    key        <- digest(tolower(trimws(tweet)))
-    pred_level <- if (exists(key, envir=classify_cache))
-      as.integer(classify_cache[[key]]$ncic_level %||% 0L) else 0L
-    list(true_pos=true_level>=threshold, pred_pos=pred_level>=threshold,
-         correct=true_level==pred_level)
-  })
-  tp <- sum(sapply(results, function(r) r$true_pos  &  r$pred_pos))
-  fp <- sum(sapply(results, function(r) !r$true_pos &  r$pred_pos))
-  fn <- sum(sapply(results, function(r) r$true_pos  & !r$pred_pos))
-  n  <- nrow(gold_df)
-  nc <- sum(sapply(results, `[[`, "correct"))
-  precision <- if (tp+fp>0) round(tp/(tp+fp),3) else NA_real_
-  recall    <- if (tp+fn>0) round(tp/(tp+fn),3) else NA_real_
-  f1 <- if (!is.na(precision)&&!is.na(recall)&&precision+recall>0)
-    round(2*precision*recall/(precision+recall),3) else NA_real_
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  dbExecute(con,
-    "INSERT INTO eval_runs (run_at,n_total,n_correct,precision_score,recall_score,f1_score,threshold,run_by) VALUES (?,?,?,?,?,?,?,?)",
-    list(format(Sys.time(),"%Y-%m-%d %H:%M:%S"),n,nc,precision,recall,f1,as.integer(threshold),officer))
-  list(n=n,correct=nc,precision=precision,recall=recall,f1=f1,tp=tp,fp=fp,fn=fn,threshold=threshold)
-}
-
-# ── v6: INTER-OFFICER AGREEMENT ───────────────────────────────────
-log_officer_agreement <- function(case_id, officer_a, level_a, officer_b, level_b) {
-  delta   <- abs(as.integer(level_a) - as.integer(level_b))
-  flagged <- if (delta > 1L) 1L else 0L
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  dbExecute(con,
-    "INSERT INTO officer_agreement (case_id,officer_a,level_a,officer_b,level_b,level_delta,flagged,ts) VALUES (?,?,?,?,?,?,?,?)",
-    list(case_id, officer_a, as.integer(level_a), officer_b, as.integer(level_b),
-         delta, flagged, format(Sys.time(),"%Y-%m-%d %H:%M:%S")))
-  flagged
-}
-
-compute_kappa <- function() {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  ag  <- tryCatch(dbReadTable(con,"officer_agreement"), error=function(e) data.frame())
-  if (nrow(ag)==0) return(list(kappa=NA,n=0L,flagged=0L,pct_agree=0))
-  n   <- nrow(ag)
-  po  <- sum(ag$level_a==ag$level_b)/n
-  pe_num <- sum(sapply(0:5,function(l) sum(ag$level_a==l)*sum(ag$level_b==l)))
-  pe  <- pe_num/n^2
-  kappa   <- if (pe<1) round((po-pe)/(1-pe),3) else 1.0
-  flagged <- sum(ag$flagged==1L,na.rm=TRUE)
-  list(kappa=kappa,n=n,flagged=flagged,pct_agree=round(po*100,1))
-}
-
-# ── v6: GPT CONFIDENCE CALIBRATION ────────────────────────────────
-update_calibration <- function(gpt_conf, gpt_level, officer_level) {
-  bucket  <- min(9L, as.integer(gpt_conf %/% 10))
-  correct <- as.integer(abs(as.integer(gpt_level)-as.integer(officer_level))<=1L)
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  existing <- dbGetQuery(con,"SELECT id,n_total,n_correct FROM confidence_calibration WHERE conf_bucket=?",list(bucket))
-  if (nrow(existing)==0) {
-    dbExecute(con,"INSERT INTO confidence_calibration (conf_bucket,n_total,n_correct,accuracy,updated_at) VALUES (?,?,?,?,?)",
-              list(bucket,1L,correct,round(correct,3),format(Sys.time(),"%Y-%m-%d %H:%M:%S")))
-  } else {
-    new_total <- existing$n_total[1]+1L; new_correct <- existing$n_correct[1]+correct
-    dbExecute(con,"UPDATE confidence_calibration SET n_total=?,n_correct=?,accuracy=?,updated_at=? WHERE conf_bucket=?",
-              list(new_total,new_correct,round(new_correct/new_total,3),format(Sys.time(),"%Y-%m-%d %H:%M:%S"),bucket))
-  }
-}
-
-load_calibration <- function() {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  tryCatch(dbGetQuery(con,"SELECT conf_bucket,n_total,n_correct,accuracy FROM confidence_calibration ORDER BY conf_bucket"),
-           error=function(e) data.frame())
-}
-
-# ── v6: KEYWORD RETIREMENT ────────────────────────────────────────
-fetch_stale_keywords <- function(days=90L) {
-  supa_url <- Sys.getenv("SUPABASE_URL"); supa_key <- Sys.getenv("SUPABASE_KEY")
-  if (nchar(supa_url)==0) return(data.frame())
-  tryCatch({
-    cutoff <- format(Sys.time()-as.difftime(days,units="days"),"%Y-%m-%dT%H:%M:%SZ")
-    req <- request(paste0(supa_url,"/rest/v1/keyword_bank")) |>
-      req_headers("apikey"=supa_key,"Authorization"=paste("Bearer",supa_key)) |>
-      req_url_query(select="id,keyword,tier,category,language,times_matched,last_matched_at",
-                    status="eq.approved",last_matched_at=paste0("lt.",cutoff))
-    fromJSON(resp_body_string(req_perform(req)),flatten=TRUE)
-  }, error=function(e) { message("[keyword retirement] ",e$message); data.frame() })
-}
-
-retire_keyword <- function(keyword_id, officer, reason="") {
-  supa_url <- Sys.getenv("SUPABASE_URL"); supa_key <- Sys.getenv("SUPABASE_KEY")
-  if (nchar(supa_url)==0) return(FALSE)
-  tryCatch({
-    req <- request(paste0(supa_url,"/rest/v1/keyword_bank")) |>
-      req_headers("apikey"=supa_key,"Authorization"=paste("Bearer",supa_key),
-                  "Content-Type"="application/json","Prefer"="return=minimal") |>
-      req_url_query(id=paste0("eq.",keyword_id)) |>
-      req_body_raw(toJSON(list(status="retired",retired_by=officer,
-                               retired_at=format(Sys.time(),"%Y-%m-%dT%H:%M:%SZ"),
-                               context=paste0("[RETIRED] ",reason)),auto_unbox=TRUE),
-                   type="application/json") |> req_method("PATCH")
-    req_perform(req)
-    log_keyword_change(keyword_id,"RETIRED",officer,old_status="approved",new_status="retired",reason=reason)
-    TRUE
-  }, error=function(e) { message("[retire] ",e$message); FALSE })
-}
-
-# ── v6: KEYWORD CHANGELOG ─────────────────────────────────────────
-log_keyword_change <- function(keyword, action, officer,
-                               old_tier=NA, new_tier=NA,
-                               old_status=NA, new_status=NA, reason="") {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  tryCatch(dbExecute(con,
-    "INSERT INTO keyword_changelog (keyword,action,old_tier,new_tier,old_status,new_status,changed_by,changed_at,reason) VALUES (?,?,?,?,?,?,?,?,?)",
-    list(keyword,action,
-         if(is.na(old_tier)) NULL else as.integer(old_tier),
-         if(is.na(new_tier)) NULL else as.integer(new_tier),
-         old_status%||%NULL,new_status%||%NULL,officer,
-         format(Sys.time(),"%Y-%m-%d %H:%M:%S"),reason)),
-  error=function(e) NULL)
-}
-
-load_keyword_changelog <- function(n=50L) {
-  con <- db_connect(); on.exit(dbDisconnect(con))
-  tryCatch(dbGetQuery(con,
-    "SELECT keyword,action,old_tier,new_tier,old_status,new_status,changed_by,changed_at,reason FROM keyword_changelog ORDER BY changed_at DESC LIMIT ?",
-    list(n)), error=function(e) data.frame())
-}
+# db_* functions loaded from supabase_db.R (sourced at startup)
 
 # ── v6: GEOGRAPHIC CLUSTERING ─────────────────────────────────────
 detect_county_clusters <- function(cases_df, window_hours=24L, min_level=3L, min_counties=2L) {
@@ -1335,16 +727,26 @@ build_cases <- function() {
 # On subsequent runs: load directly from DB — all validations intact.
 {
   db_cases <- db_load_cases()
+  if (!is.null(db_cases) && nrow(db_cases) > 0) {
+    DATE_MIN <<- as.Date(min(db_cases$timestamp, na.rm=TRUE))
+    DATE_MAX <<- as.Date(max(db_cases$timestamp, na.rm=TRUE))
+  }
   if (is.null(db_cases) || nrow(db_cases) == 0) {
-    message("[db] No cases found — seeding with generated data...")
-    all_cases <- build_cases()
-    all_cases$risk_level    <- with(all_cases,
-                                    ifelse(risk_score>=65,"HIGH",
-                                           ifelse(risk_score>=35,"MEDIUM","LOW")))
-    all_cases$timestamp_chr <- format(all_cases$timestamp, "%Y-%m-%d %H:%M")
-    all_cases$notes         <- ""
-    db_save_cases(all_cases)
-    message(sprintf("[db] Seeded %d cases", nrow(all_cases)))
+    message("[db] No cases found — starting empty (pipeline data only)")
+    all_cases <- data.frame(
+      case_id=character(), county=character(), sub_location=character(),
+      src_lat=numeric(), src_lng=numeric(), target_county=character(),
+      tgt_lat=numeric(), tgt_lng=numeric(), target_group=character(),
+      platform=character(), handle=character(), tweet_text=character(),
+      language=character(), ncic_level=integer(), ncic_label=character(),
+      section_13=integer(), confidence=character(), conf_num=integer(),
+      conf_band=character(), category=character(), validated_by=character(),
+      validated_at=character(), action_taken=character(),
+      officer_ncic_override=integer(), risk_score=integer(),
+      risk_level=character(), risk_formula=character(), kw_score=integer(),
+      network_score=integer(), signals=character(), trend_data=character(),
+      timestamp=character(), timestamp_chr=character(), notes=character(),
+      stringsAsFactors=FALSE)
   } else {
     all_cases <- db_cases
     message(sprintf("[db] Loaded %d cases from DB", nrow(all_cases)))
@@ -2352,31 +1754,35 @@ ui <- page_navbar(
                                                      ),
                                                      
                                                      accordion_panel(title=tagList(bs_icon("funnel")," Filters"),value="acc_filt",
-                                                                     selectInput("f_county","County",choices=c("All Counties",counties$name),selected="All Counties",width="100%"),
+                                                                     selectInput("f_county","County",choices=c("All Counties",counties$name),selected="Nairobi",width="100%"),
                                                                      selectInput("f_ncic","NCIC Level",
-                                                                                 choices=c("All",setNames(0:5,paste0("L",0:5," — ",NCIC_LEVELS))),
+                                                                                 choices=c("All",setNames(5:0,paste0("L",5:0," — ",rev(NCIC_LEVELS)))),
                                                                                  selected="All",width="100%"),
-                                                                     selectInput("f_platform","Platform",choices=c("All",platforms),selected="All",width="100%"),
-                                                                     sliderInput("f_conf","Min. Confidence (%)",min=0,max=100,value=0,step=5,width="100%"),
+                                                                     
+                                                                     
                                                                      date_filter_ui("map_dr","Date window"),
                                                                      checkboxInput("show_flow","Show message flow arrows",value=TRUE)
                                                      ),
                                                      
-                                                     accordion_panel(title=tagList(bs_icon("bar-chart")," Stats"),value="acc_stats",
-                                                                     uiOutput("sidebar_stats")),
+
                                                      
-                                                     accordion_panel(title=tagList(bs_icon("info-circle")," Legend"),value="acc_leg",
-                                                                     tags$div(style="font-size:11px;",
-                                                                              lapply(rev(as.character(0:5)),function(l)
-                                                                                tags$div(style="display:flex;align-items:center;gap:8px;margin-bottom:5px;",
-                                                                                         tags$div(style=paste0("width:12px;height:12px;border-radius:50%;background:",ncic_color(l),";flex-shrink:0;")),
-                                                                                         paste0("L",l," — ",ncic_name(l))))
-                                                                     )
-                                                     )
+
                                            )
                            ),
                            card(full_screen=TRUE,
-                                card_header(tagList(bs_icon("geo-alt")," Kenya Incident Map · NCIC Level Colouring · click for cases")),
+                                card_header(
+    tags$div(style="display:flex;align-items:center;justify-content:space-between;width:100%;",
+      tagList(bs_icon("geo-alt")," Kenya Incident Map · NCIC Level Colouring · click for cases"),
+      tags$div(style="display:flex;gap:6px;",
+        tags$span(style="font-size:10px;color:#6c757d;margin-top:3px;font-style:italic;","🇰🇪 Kenya"),
+        checkboxInput("show_regional", 
+          tagList(bs_icon("globe")," Regional Threats"),
+          value=FALSE),
+        tags$span(style="font-size:10px;color:#6c757d;margin-top:3px;",
+          "🌍 East Africa")
+      )
+    )
+  ),
                                 leafletOutput("kenya_map",height="620px"))
             )
   ),
@@ -3362,7 +2768,50 @@ ui <- page_navbar(
   )
 )
 # ── SERVER ───────────────────────────────────────────────────────
+# ── MAP SUMMARY GENERATOR ────────────────────────────────────────
+generate_map_summary <- function(d, county) {
+  n      <- nrow(d)
+  if (n == 0) return("No signals match the current filters.")
+  l5     <- sum(d$ncic_level == 5)
+  l4     <- sum(d$ncic_level == 4)
+  l3     <- sum(d$ncic_level == 3)
+  l0     <- sum(d$ncic_level == 0)
+  loc    <- if (county == "All Counties") "across Kenya" else paste("in", county)
+  urgent <- l5 + l4
+  
+  # Lead sentence
+  lead <- if (urgent == 0) {
+    sprintf("%d signals detected %s — no immediate escalation required.", n, loc)
+  } else if (l5 > 0) {
+    sprintf("%d signals detected %s — %d require IMMEDIATE escalation (L5 Toxic).", n, loc, l5)
+  } else {
+    sprintf("%d signals detected %s — %d meet Section 13 threshold (L4 Hate Speech).", n, loc, l4)
+  }
+  
+  # Pattern sentence
+  pattern <- if (l3 > 0 && urgent > 0) {
+    sprintf("Dehumanisation content (%d L3) suggests coordinated escalation pattern.", l3)
+  } else if (l0 > n * 0.5) {
+    "Majority of signals are neutral — monitor for trend changes."
+  } else if (urgent > n * 0.4) {
+    "High proportion of severe content — cross-reference with independent sources before action."
+  } else {
+    "Signal distribution within normal monitoring range."
+  }
+  
+  paste(lead, pattern)
+}
+
 server <- function(input, output, session) {
+  # Update date filters once on session start
+  session$onFlushed(function() {
+    d_min <- as.Date(min(all_cases$timestamp, na.rm=TRUE))
+    d_max <- as.Date(max(all_cases$timestamp, na.rm=TRUE))
+    updateDateRangeInput(session, "map_dr",  start=d_min, end=d_max, min=d_min, max=d_max)
+    updateDateRangeInput(session, "dash_dr", start=d_min, end=d_max, min=d_min, max=d_max)
+    updateDateRangeInput(session, "clf_dr",  start=d_min, end=d_max, min=d_min, max=d_max)
+    updateDateRangeInput(session, "fl_dr",   start=d_min, end=d_max, min=d_min, max=d_max)
+  }, once=TRUE)
   
   rv <- reactiveValues(
     authenticated  = FALSE,
@@ -3892,7 +3341,8 @@ server <- function(input, output, session) {
   output$kenya_map <- renderLeaflet({
     leaflet(options=leafletOptions(zoomControl=TRUE)) |>
       addProviderTiles("CartoDB.Positron") |>
-      setView(lng=37.9,lat=0.02,zoom=6)
+      setView(lng=37.9,lat=0.5,zoom=6)
+
   })
   
   observe({
@@ -3917,10 +3367,14 @@ server <- function(input, output, session) {
     for (i in seq_len(nrow(agg))) {
       n    <- agg$n[i]; co <- agg$county[i]
       lvl  <- round(agg$avg_ncic[i])
-      col  <- unname(ncic_color(lvl))
       r    <- max(10, min(36, sqrt(n) * 2.8))
       co_d <- d[d$county == co, ]          # all cases for this county
       co_c <- co_d[seq_len(min(6, nrow(co_d))), ]   # top 6 for case table
+      is_reg <- any(sapply(seq_len(nrow(co_d)), function(k) {
+        detect_region(co_d$src_lat[k], co_d$src_lng[k], co_d$text[k] %||% "")
+      }) == "Regional", na.rm=TRUE)
+      if (!is.null(input$show_regional) && !isTRUE(input$show_regional) && is_reg) next
+      col  <- if (is_reg) "#7c3aed" else unname(ncic_color(lvl))
       
       # ── Level distribution pills ──────────────────────────────
       level_pills <- paste0(
@@ -4117,6 +3571,37 @@ server <- function(input, output, session) {
       )
     }
     
+    # ── Dynamic legend — responds to filters ──────────────────
+    summary_txt <- generate_map_summary(d, input$f_county %||% "All Counties")
+    legend_html <- paste0(
+      "<div style=\"background:rgba(255,255,255,0.95);border:1px solid #dee2e6;",
+      "border-radius:8px;padding:10px 14px;font-size:11px;",
+      "box-shadow:0 2px 8px rgba(0,0,0,0.15);min-width:220px;max-width:260px;\">",
+      "<div style=\"font-weight:700;color:#1a1a2e;margin-bottom:8px;font-size:11px;",
+      "border-bottom:1px solid #dee2e6;padding-bottom:5px;\">",
+      "&#9432; NCIC Signal Levels</div>",
+      paste0(sapply(rev(as.character(0:5)), function(l) {
+        cnt <- sum(d$ncic_level == as.integer(l))
+        paste0(
+          "<div style=\"display:flex;align-items:center;gap:7px;margin-bottom:5px;\">",
+          "<div style=\"width:11px;height:11px;border-radius:50%;background:",
+          ncic_color(l), ";flex-shrink:0;\"></div>",
+          "<span style=\"flex:1;color:#374151;\">L", l,
+          " — ", ncic_name(l), "</span>",
+          "<span style=\"font-weight:700;color:", ncic_color(l),
+          ";min-width:24px;text-align:right;font-family:monospace;\">",
+          cnt, "</span></div>"
+        )
+      }), collapse=""),
+      "<div style=\"border-top:1px solid #dee2e6;margin-top:8px;padding-top:8px;",
+      "font-size:10px;color:#374151;line-height:1.5;\">",
+      summary_txt,
+      "</div>",
+      "</div>"
+    )
+    proxy |> clearControls() |>
+      addControl(html=legend_html, position="bottomright")
+
     if (isTRUE(input$show_flow)) {
       td <- d[d$ncic_level>=3,]
       flows <- td |> group_by(county,target_county,ncic_level) |>
@@ -4146,7 +3631,24 @@ server <- function(input, output, session) {
   
   output$flow_map <- renderLeaflet({
     leaflet() |> addProviderTiles("CartoDB.Positron") |>
-      setView(lng=37.9,lat=0.02,zoom=6)
+      setView(lng=37.9,lat=0.5,zoom=6)
+    addControl(
+      html = paste0(
+        "<div style=\"background:rgba(255,255,255,0.95);border:1px solid #dee2e6;",
+        "border-radius:8px;padding:10px 14px;font-size:11px;",
+        "box-shadow:0 2px 8px rgba(0,0,0,0.15)\">",
+        "<div style=\"font-weight:700;color:#1a1a2e;margin-bottom:6px;\">",
+        "&#9432; NCIC Levels</div>",
+        paste0(sapply(rev(as.character(0:5)), function(l) {
+          paste0("<div style=\"display:flex;align-items:center;gap:7px;margin-bottom:4px;\">",
+                 "<div style=\"width:11px;height:11px;border-radius:50%;background:",
+                 ncic_color(l), ";flex-shrink:0;\"></div>",
+                 "<span>L", l, " — ", ncic_name(l), "</span></div>")
+        }), collapse=""),
+        "</div>"
+      ),
+      position = "bottomright"
+    )
   })
   observe({
     d <- apply_date_filter(rv$cases, input$fl_dr)
@@ -6488,9 +5990,8 @@ server <- function(input, output, session) {
         tags$div(style="font-size:10px;color:#6c757d;margin-bottom:8px;",
                  "κ: 0.0–0.2 Poor · 0.2–0.4 Fair · 0.4–0.6 Moderate · 0.6–0.8 Substantial · 0.8–1.0 Almost perfect"),
         if (fl > 0) {
-          con <- db_connect(); on.exit(dbDisconnect(con))
-          flagged_df <- tryCatch(dbGetQuery(con,
-            "SELECT case_id,officer_a,level_a,officer_b,level_b,level_delta,ts FROM officer_agreement WHERE flagged=1 ORDER BY ts DESC LIMIT 20"),
+          flagged_df <- tryCatch(
+            .supa_get("officer_agreement", list(flagged="eq.1", order="ts.desc"), limit=20L),
             error=function(e) data.frame())
           if (nrow(flagged_df)>0)
             DT::datatable(flagged_df,rownames=FALSE,

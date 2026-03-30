@@ -199,7 +199,7 @@ card(
       uiOutput("eval_history_ui")
     )
   )
-),
+)
 
 # ── CHANGE 1D: Add evaluation observers and outputs ───────────────
 # ADD inside server:
@@ -428,7 +428,7 @@ tags$details(
       }
     }
   )
-),
+)
 
 
 # ================================================================
@@ -521,7 +521,7 @@ card(
     ),
     uiOutput("calibration_ui")
   )
-),
+)
 
 # ── CHANGE 3E: Add calibration render output ─────────────────────
 # ADD inside server:
@@ -664,7 +664,7 @@ detect_county_clusters <- function(cases_df, window_hours = 24L,
 # ── CHANGE 5B: Add cluster alert to dashboard ─────────────────────
 # ADD to rv reactive values (~ line 3021), after learning_flash:
 
-  cluster_alert = NULL,
+  cluster_alert = NULL
 
 # ── CHANGE 5C: Add cluster detection timer ────────────────────────
 # ADD inside server, after timeout_timer:
@@ -722,7 +722,7 @@ if (!is.null(rv$cluster_alert)) {
       )
     )
   )
-} else NULL,
+} else NULL
 
 # ── CHANGE 5E: Add county cluster panel to learn_ui ───────────────
 # ADD as new card in learn_ui, after calibration card:
@@ -739,7 +739,7 @@ card(
     ),
     uiOutput("cluster_ui")
   )
-),
+)
 
 # ── CHANGE 5F: Add cluster render output ─────────────────────────
 
@@ -902,7 +902,7 @@ card(
     ),
     uiOutput("changelog_ui")
   )
-),
+)
 
 # ── CHANGE 6E: Add changelog render output ───────────────────────
 
@@ -960,8 +960,8 @@ output$changelog_ui <- renderUI({
 # FIND:   learning_flash = "",
 # ADD after it:
 
-  last_eval     = NULL,
-  cluster_alert = NULL,
+  last_eval     = NULL
+  cluster_alert = NULL
 
 
 # ================================================================

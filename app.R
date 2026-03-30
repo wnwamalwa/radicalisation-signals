@@ -4269,8 +4269,18 @@ server <- function(input, output, session) {
                                 tags$div(style="font-size:11px;font-weight:600;color:#374151;margin-bottom:3px;","4. Why this NCIC level?"),
                                 textAreaInput(paste0("sig_reason_",cid),NULL,width="100%",rows=2,
                                   placeholder="e.g. 'kuchinja' means to slaughter — used to call for violence against the Kikuyu")),
+              tags$div(style="margin-bottom:8px;",
+                tags$div(style="font-size:11px;font-weight:600;color:#374151;margin-bottom:3px;","5. Context type:"),
+                selectInput(paste0("ctx_selected_",cid),NULL,width="100%",
+                  choices=c("Select..."="",
+                    "Ethnic incitement"="ethnic_incitement",
+                    "Political violence"="political_violence",
+                    "Historical reference"="historical_reference",
+                    "Satire / humour"="satire",
+                    "Neutral / no threat"="neutral"))),
+
                               tags$div(style="border-top:1px solid #e5e7eb;padding-top:8px;",
-                                tags$div(style="font-size:10px;font-weight:600;color:#374151;margin-bottom:6px;","5. Decision:"),
+                                tags$div(style="font-size:10px;font-weight:600;color:#374151;margin-bottom:6px;","6. Decision:"),
                                 tags$div(style="display:flex;gap:6px;flex-wrap:wrap;",
                                   tags$div(style="display:flex;flex-direction:column;align-items:center;gap:2px;",
                                     actionButton(paste0("confirm_",cid),"✓ Confirm",class="btn-val-confirm"),
@@ -4368,6 +4378,21 @@ server <- function(input, output, session) {
           # v6: extract keywords from validated post → Supabase
           extract_and_save_keywords(tweet_val, final_ncic, action_str, officer,
                                     sig_words, sig_denotes, sig_lang, officer_reasoning)
+
+          # v7: save validation evidence + update context weights
+          tryCatch({
+            kw_list <- trimws(unlist(strsplit(sig_words, ",")))
+            kw_list <- kw_list[nchar(kw_list) > 0]
+            ctx <- isolate(input[[paste0("ctx_selected_", cid)]]) %||% ""
+            if (length(kw_list) > 0 && nchar(ctx) > 0)
+              db_process_validation_evidence(
+                case_id=cid, officer=officer, action=action_str,
+                keywords=kw_list, context_type=ctx,
+                tweet_text=tweet_val, ncic_level=final_ncic,
+                county=rv$cases$county[rv$cases$case_id==cid][1] %||% "",
+                platform=rv$cases$platform[rv$cases$case_id==cid][1] %||% "")
+          }, error=function(e) message("[evidence] ", e$message))
+
 
           # v6: update GPT confidence calibration
           update_calibration(rv$cases$conf_num[rv$cases$case_id==cid][1], cur_ncic, final_ncic)
@@ -4518,6 +4543,61 @@ server <- function(input, output, session) {
                      value_box("GPT Disagreements", nrow(dis),   showcase=bs_icon("exclamation-circle"), theme="warning"),
                      value_box("Cases Rescored",    nrow(rv$cases), showcase=bs_icon("arrow-repeat"),    theme="info")
       ),
+      
+      # ── Live Learning Feed ─────────────────────────────────────   ← PASTE STARTS HERE
+      card(style="border-top:3px solid #7c3aed;margin-bottom:12px;",
+           card_header(tagList(bs_icon("activity")," Live Learning Feed",
+                               tags$span(style="font-size:10px;color:#6c757d;font-weight:400;margin-left:8px;",
+                                         "updates with each officer decision"))),
+           tags$div(style="padding:8px 14px;",
+                    local({
+                      feed <- tryCatch(db_load_validation_evidence(limit=8L), error=function(e) data.frame())
+                      if (nrow(feed)==0) {
+                        tags$p(style="font-size:12px;color:#6c757d;padding:4px 0;",
+                               "No validation decisions recorded yet.")
+                      } else {
+                        action_colors <- list(CONFIRMED="#639922",ESCALATED="#E24B4A",
+                                              DOWNGRADED="#185FA5",CLEARED="#888780")
+                        ctx_labels <- list(ethnic_incitement="ethnic incitement",
+                                           political_violence="political violence",
+                                           historical_reference="historical ref",
+                                           satire="satire",neutral="neutral")
+                        tagList(lapply(seq_len(nrow(feed)), function(i) {
+                          row <- feed[i,]
+                          col <- action_colors[[row$action]] %||% "#888780"
+                          kws <- trimws(unlist(strsplit(row$keywords %||% "", "\\|")))
+                          kws <- kws[nchar(kws)>0]
+                          ctx <- ctx_labels[[row$context_type]] %||% row$context_type %||% ""
+                          ts  <- tryCatch(
+                            format(as.POSIXct(row$created_at,tz="UTC"),tz="Africa/Nairobi","%H:%M"),
+                            error=function(e) "")
+                          tags$div(
+                            style="display:flex;gap:10px;align-items:flex-start;padding:7px 0;border-bottom:0.5px solid #f0f0f0;",
+                            tags$div(style=paste0("width:8px;height:8px;border-radius:50%;background:",col,
+                                                  ";flex-shrink:0;margin-top:4px;")),
+                            tags$div(style="flex:1;",
+                                     tags$div(style="font-size:11px;color:#374151;",
+                                              tags$strong(row$officer %||% ""),
+                                              paste0(" ", tolower(row$action %||% ""), " "),
+                                              tags$span(style="font-family:monospace;font-size:10px;color:#9ca3af;",
+                                                        row$case_id %||% "")),
+                                     if(length(kws)>0)
+                                       tags$div(style="margin-top:3px;",
+                                                lapply(kws, function(k)
+                                                  tags$span(k, style="display:inline-block;background:#EEEDFE;color:#3C3489;border-radius:10px;padding:1px 8px;font-size:10px;margin:1px;")))
+                                     else NULL,
+                                     tags$div(style="font-size:10px;color:#9ca3af;margin-top:2px;",
+                                              paste0("context: ", ctx))
+                            ),
+                            tags$div(style="font-size:10px;color:#9ca3af;white-space:nowrap;", ts)
+                          )
+                        }))
+                      }
+                    })
+           )
+      ),                                                             ← PASTE ENDS HERE
+      
+      # ── Keyword Editor + Weights ───────────────────────────────
       
       # ── Keyword Editor + Weights ───────────────────────────────
       layout_columns(col_widths=c(5,7),

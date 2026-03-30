@@ -53,51 +53,22 @@
 
 .supa_patch <- function(table, filter_col, filter_val, data) {
   req <- .supa_req(table, "PATCH") |>
-    req_url_query(setNames(list(paste0("eq.", filter_val)), filter_col)) |>
-    req_headers("Prefer"="return=minimal") |>
+    req_headers("Prefer" = "return=minimal") |>
+    req_url_query(!!filter_col := paste0("eq.", filter_val)) |>
     req_body_raw(
       jsonlite::toJSON(data, auto_unbox=TRUE, na="null"),
-      type="application/json")
+      type="application/json"
+    )
   req_perform(req)
 }
 
-.supa_delete <- function(table, filter_col, filter_val) {
-  req <- .supa_req(table, "DELETE") |>
-    req_url_query(setNames(list(paste0("eq.", filter_val)), filter_col))
-  req_perform(req)
-}
-
-# ── db_init ───────────────────────────────────────────────────────
-# No-op for Supabase — tables already exist
-db_init <- function() {
-  message("[db] Supabase mode — no init needed")
-  invisible(TRUE)
-}
-
-# ── db_connect ────────────────────────────────────────────────────
-# No-op for Supabase — kept for compatibility
-db_connect <- function() {
-  list(supabase=TRUE, url=.supa_url())
-}
-dbDisconnect <- function(con, ...) invisible(NULL)
-
-# ── OFFICER MANAGEMENT ─────────────────────────────────────────────
-db_seed_admin <- function() {
-  u  <- Sys.getenv("ADMIN_USERNAME")
-  p  <- Sys.getenv("ADMIN_PASSWORD")
-  if (!nchar(u) || !nchar(p)) {
-    warning("[auth] ADMIN_USERNAME / ADMIN_PASSWORD not set — no admin seeded")
-    return(invisible(NULL))
-  }
+# ── OFFICERS ──────────────────────────────────────────────────────
+db_seed_admin <- function(u, p) {
   existing <- .supa_get("officers", list(username=paste0("eq.", u)))
-  if (nrow(existing) > 0) {
-    message(sprintf("[auth] Admin '%s' already exists", u))
-    return(invisible(NULL))
-  }
-  hash <- bcrypt::hashpw(p)
+  if (nrow(existing) > 0) return(invisible(NULL))
   .supa_post("officers", data.frame(
     username      = u,
-    password_hash = hash,
+    password_hash = bcrypt::hashpw(p),
     role          = "admin",
     active        = 1L,
     created_at    = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
@@ -135,90 +106,10 @@ db_deactivate_officer <- function(username) {
 }
 
 db_load_officers <- function() {
-  .supa_get("officers")
+  .supa_get("officers", list(active="eq.1", order="username.asc"))
 }
 
-# ── AUDIT LOG ──────────────────────────────────────────────────────
-audit <- function(officer, officer_name, action, case_id=NA,
-                  detail=NA, session_id=NA) {
-  .supa_post("audit_log", data.frame(
-    ts           = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
-    officer      = officer %||% "",
-    officer_name = officer_name %||% "",
-    action       = action,
-    case_id      = case_id %||% NA_character_,
-    detail       = detail  %||% NA_character_,
-    session_id   = session_id %||% NA_character_,
-    stringsAsFactors = FALSE
-  ))
-  invisible(NULL)
-}
-
-db_load_audit <- function(limit=500L) {
-  .supa_get("audit_log", list(order="ts.desc"), limit=limit)
-}
-
-# ── CASES ──────────────────────────────────────────────────────────
-db_load_cases <- function() {
-  d <- .supa_get("cases", list(order="timestamp.desc"), limit=50000L)
-  if (nrow(d) == 0) return(NULL)
-  # Ensure correct types
-  int_cols <- c("ncic_level","section_13","conf_num","officer_ncic_override",
-                "risk_score","kw_score","network_score")
-  for (col in intersect(int_cols, names(d)))
-    d[[col]] <- suppressWarnings(as.integer(d[[col]]))
-  d
-}
-
-db_save_cases <- function(df) {
-  if (nrow(df) == 0) return(invisible(NULL))
-  batch_size <- 100L
-  for (i in seq_len(ceiling(nrow(df)/batch_size))) {
-    start <- (i-1)*batch_size + 1L
-    end   <- min(i*batch_size, nrow(df))
-    batch <- df[start:end, ]
-    .supa_post("cases", batch, upsert=TRUE)
-  }
-  invisible(NULL)
-}
-
-db_update_case <- function(case_id, fields) {
-  .supa_patch("cases", "case_id", case_id, fields)
-  invisible(NULL)
-}
-
-# ── API FAILURES ───────────────────────────────────────────────────
-db_log_failure <- function(case_id, tweet_text, error_msg, attempt=1L) {
-  .supa_post("api_failures", data.frame(
-    case_id    = case_id,
-    tweet_text = tweet_text,
-    error_msg  = error_msg,
-    attempt    = as.integer(attempt),
-    ts         = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
-    resolved   = 0L,
-    stringsAsFactors = FALSE
-  ))
-  invisible(NULL)
-}
-
-db_resolve_failure <- function(case_id) {
-  .supa_patch("api_failures", "case_id", case_id, list(resolved=1L))
-  invisible(NULL)
-}
-
-db_load_failures <- function(unresolved_only=TRUE) {
-  params <- if (unresolved_only) list(resolved="eq.0") else list()
-  .supa_get("api_failures", params)
-}
-
-db_clear_failures <- function() {
-  req <- .supa_req("api_failures", "DELETE") |>
-    req_url_query(resolved="eq.1")
-  req_perform(req)
-  invisible(NULL)
-}
-
-# ── KEYWORD WEIGHTS ────────────────────────────────────────────────
+# ── KEYWORD WEIGHTS ───────────────────────────────────────────────
 db_load_weights <- function() {
   d <- .supa_get("keyword_weights")
   if (nrow(d) == 0) return(list())
@@ -274,7 +165,6 @@ db_s13_load <- function() {
 }
 
 db_s13_backfill <- function() {
-  # No-op for Supabase — backfill handled by ingest pipeline
   invisible(NULL)
 }
 
@@ -345,14 +235,14 @@ save_officer_agreement <- function(case_id, officer_a, level_a,
   delta   <- abs(as.integer(level_a) - as.integer(level_b))
   flagged <- if (delta >= 2L) 1L else 0L
   .supa_post("officer_agreement", data.frame(
-    case_id    = case_id,
-    officer_a  = officer_a,
-    level_a    = as.integer(level_a),
-    officer_b  = officer_b,
-    level_b    = as.integer(level_b),
-    level_delta= delta,
-    flagged    = flagged,
-    ts         = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
+    case_id     = case_id,
+    officer_a   = officer_a,
+    level_a     = as.integer(level_a),
+    officer_b   = officer_b,
+    level_b     = as.integer(level_b),
+    level_delta = delta,
+    flagged     = flagged,
+    ts          = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
     stringsAsFactors = FALSE
   ))
   invisible(NULL)
@@ -379,9 +269,10 @@ update_calibration <- function(conf_bucket, correct) {
     n_total   <- existing$n_total[1] + 1L
     n_correct <- existing$n_correct[1] + as.integer(correct)
     .supa_patch("confidence_calibration", "conf_bucket", conf_bucket,
-      list(n_total=n_total, n_correct=n_correct,
-           accuracy=round(n_correct/n_total, 4),
-           updated_at=format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ")))
+      list(n_total   = n_total,
+           n_correct = n_correct,
+           accuracy  = round(n_correct/n_total, 4),
+           updated_at= format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ")))
   }
   invisible(NULL)
 }
@@ -391,15 +282,15 @@ fetch_stale_keywords <- function(days=90L) {
   cutoff <- format(Sys.time() - as.difftime(days, units="days"),
                    "%Y-%m-%dT%H:%M:%SZ")
   .supa_get("keyword_bank",
-    list(status="eq.approved",
-         last_matched_at=paste0("lt.", cutoff)))
+    list(status         = "eq.approved",
+         last_matched_at= paste0("lt.", cutoff)))
 }
 
 retire_keyword <- function(kw_id, officer, reason="") {
   resp <- .supa_patch("keyword_bank", "id", kw_id,
-    list(status="retired",
-         retired_by=officer,
-         retired_at=format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ")))
+    list(status     = "retired",
+         retired_by = officer,
+         retired_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ")))
   if (resp_status(resp) %in% c(200L, 204L)) {
     .supa_post("keyword_retirements", data.frame(
       keyword    = kw_id,
@@ -451,9 +342,11 @@ log_disagreement <- function(officer, case_id, tweet,
   invisible(NULL)
 }
 
+load_disagreements <- function(limit=50L) {
+  .supa_get("disagreements", list(order="ts.desc"), limit=limit)
+}
+
 # ── GPT CACHE (Supabase-backed) ────────────────────────────────────
-# Optional: use Supabase gpt_cache table instead of local RDS
-# classify_cache env stays in memory; this syncs on startup
 sync_gpt_cache_from_supabase <- function(env) {
   d <- tryCatch(.supa_get("gpt_cache", limit=50000L), error=function(e) data.frame())
   if (nrow(d) == 0) return(invisible(NULL))
@@ -479,12 +372,225 @@ save_gpt_cache_to_supabase <- function(key, result, env) {
 }
 
 # ── DB POLL (cross-session sync) ───────────────────────────────────
-# Replaces SQLite poll — fetches recently updated cases from Supabase
 db_poll_recent <- function(since_ts) {
   .supa_get("cases",
-    list(updated_at=paste0("gt.", format(since_ts, "%Y-%m-%dT%H:%M:%SZ")),
-         order="updated_at.desc"),
+    list(updated_at = paste0("gt.", format(since_ts, "%Y-%m-%dT%H:%M:%SZ")),
+         order      = "updated_at.desc"),
     limit=500L)
 }
 
+# ================================================================
+#  VALIDATION EVIDENCE + CONTEXT-AWARE KEYWORD WEIGHTS
+#  Learning loop: officer decisions feed back into scoring model
+# ================================================================
+
+# ── Save officer decision with keyword evidence and context ───────
+db_save_validation_evidence <- function(case_id, officer, action,
+                                         keywords, context_type,
+                                         tweet_text="", ncic_level=NA,
+                                         county="", platform="") {
+  .supa_post("validation_evidence", data.frame(
+    case_id      = case_id,
+    officer      = officer,
+    action       = action,
+    keywords     = paste(keywords, collapse="|"),
+    context_type = context_type,
+    tweet_text   = substr(tweet_text %||% "", 1, 500),
+    ncic_level   = as.integer(ncic_level %||% NA_integer_),
+    county       = county %||% "",
+    platform     = platform %||% "",
+    created_at   = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
+    stringsAsFactors = FALSE
+  ))
+  invisible(NULL)
+}
+
+# ── Load recent validation evidence (for live learning feed) ──────
+db_load_validation_evidence <- function(limit=20L) {
+  .supa_get("validation_evidence",
+            list(order="created_at.desc"),
+            limit=limit)
+}
+
+# ── Load context weights as nested list: keyword -> context -> weight
+db_load_context_weights <- function() {
+  d <- .supa_get("keyword_context_weights")
+  if (nrow(d) == 0) return(list())
+  result <- list()
+  for (i in seq_len(nrow(d))) {
+    kw  <- d$keyword[i]
+    ctx <- d$context_type[i]
+    if (is.null(result[[kw]])) result[[kw]] <- list()
+    result[[kw]][[ctx]] <- as.numeric(d$weight[i])
+  }
+  result
+}
+
+# ── Boost or suppress a keyword's weight for a specific context ───
+# confirm/escalate → boost; downgrade/clear → suppress
+db_update_context_weight <- function(keyword, context_type, action, officer) {
+  keyword    <- tolower(trimws(keyword))
+  is_harmful <- context_type %in% c("ethnic_incitement", "political_violence")
+  is_safe    <- context_type %in% c("satire", "neutral")
+  is_confirm <- action %in% c("CONFIRMED", "ESCALATED")
+  is_suppress<- action %in% c("CLEARED", "DOWNGRADED")
+
+  existing <- tryCatch(
+    .supa_get("keyword_context_weights",
+      list(keyword      = paste0("eq.", keyword),
+           context_type = paste0("eq.", context_type))),
+    error = function(e) data.frame()
+  )
+
+  if (nrow(existing) == 0) {
+    base_weight <- dplyr::case_when(
+      context_type == "ethnic_incitement"    ~ 60,
+      context_type == "political_violence"   ~ 55,
+      context_type == "historical_reference" ~ 35,
+      context_type == "satire"               ~ 10,
+      context_type == "neutral"              ~  5,
+      TRUE                                   ~ 30
+    )
+    .supa_post("keyword_context_weights", data.frame(
+      keyword            = keyword,
+      context_type       = context_type,
+      weight             = as.numeric(base_weight),
+      confirmation_count = as.integer(is_confirm),
+      suppression_count  = as.integer(is_suppress),
+      last_updated       = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
+      stringsAsFactors   = FALSE
+    ))
+  } else {
+    old_weight <- as.numeric(existing$weight[1])
+    new_weight <- if (is_confirm)
+      min(100, old_weight + if (is_harmful) 7 else 3)
+    else if (is_suppress)
+      max(1,   old_weight - if (is_safe)   10 else 5)
+    else
+      old_weight
+
+    .supa_patch("keyword_context_weights", "keyword", keyword,
+      list(
+        weight             = round(new_weight, 1),
+        confirmation_count = as.integer(existing$confirmation_count[1]) + as.integer(is_confirm),
+        suppression_count  = as.integer(existing$suppression_count[1])  + as.integer(is_suppress),
+        last_updated       = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ")
+      )
+    )
+
+    log_keyword_change(
+      keyword    = keyword,
+      action     = if (is_confirm) "CONTEXT_BOOSTED" else "CONTEXT_SUPPRESSED",
+      old_status = as.character(round(old_weight)),
+      new_status = as.character(round(new_weight)),
+      changed_by = officer,
+      reason     = paste0("Officer ", action, " in context: ", context_type)
+    )
+  }
+  invisible(NULL)
+}
+
+# ── Master function: call this from validation observer in app.R ──
+db_process_validation_evidence <- function(case_id, officer, action,
+                                            keywords, context_type,
+                                            tweet_text, ncic_level,
+                                            county, platform) {
+  if (length(keywords) == 0 || nchar(context_type %||% "") == 0)
+    return(invisible(NULL))
+
+  # 1. Save evidence record
+  db_save_validation_evidence(
+    case_id=case_id, officer=officer, action=action,
+    keywords=keywords, context_type=context_type,
+    tweet_text=tweet_text, ncic_level=ncic_level,
+    county=county, platform=platform
+  )
+
+  # 2. Update context weights for each keyword
+  for (kw in keywords)
+    tryCatch(
+      db_update_context_weight(kw, context_type, action, officer),
+      error = function(e)
+        message(sprintf("[evidence] weight update failed for '%s': %s", kw, e$message))
+    )
+
+  # 3. Add to keyword_bank if confirming harmful content
+  is_confirm <- action %in% c("CONFIRMED", "ESCALATED")
+  is_harmful <- context_type %in% c("ethnic_incitement", "political_violence")
+  is_safe    <- context_type %in% c("satire", "neutral")
+  tier       <- if (!is.na(ncic_level) && ncic_level >= 5) 1L else
+                if (!is.na(ncic_level) && ncic_level >= 4) 2L else 3L
+
+  for (kw in keywords) {
+    kw_clean <- tolower(trimws(kw))
+    existing_kw <- tryCatch(
+      .supa_get("keyword_bank", list(keyword=paste0("eq.", kw_clean))),
+      error = function(e) data.frame()
+    )
+
+    if (is_confirm && is_harmful && nrow(existing_kw) == 0) {
+      tryCatch(
+        .supa_post("keyword_bank", data.frame(
+          keyword    = kw_clean,
+          tier       = tier,
+          category   = context_type,
+          language   = "sw_en",
+          context    = paste0("Officer-selected: ", context_type),
+          added_by   = officer,
+          added_at   = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
+          status     = "approved",
+          confidence = 0.95,
+          stringsAsFactors = FALSE
+        )),
+        error = function(e)
+          message(sprintf("[evidence] keyword_bank insert failed for '%s': %s", kw, e$message))
+      )
+      log_keyword_change(
+        keyword    = kw,
+        action     = "ADDED",
+        new_tier   = tier,
+        new_status = "approved",
+        changed_by = officer,
+        reason     = paste0("Officer-selected evidence: ", context_type)
+      )
+    }
+
+    # 4. Suppress in safe context — annotate but keep in bank
+    if (is_safe && nrow(existing_kw) > 0) {
+      tryCatch(
+        .supa_patch("keyword_bank", "keyword", kw_clean,
+          list(context = paste0(
+            existing_kw$context[1] %||% "",
+            " | suppressed in: ", context_type
+          ))),
+        error = function(e) NULL
+      )
+      log_keyword_change(
+        keyword    = kw,
+        action     = "CONTEXT_SUPPRESSED",
+        changed_by = officer,
+        reason     = paste0("Officer cleared/downgraded in context: ", context_type)
+      )
+    }
+  }
+
+  message(sprintf("[evidence] %s: %d keywords processed · context=%s · action=%s",
+                  case_id, length(keywords), context_type, action))
+  invisible(NULL)
+}
+
+# ── Get context-adjusted score for a keyword in a given context ───
+db_get_context_score <- function(keyword, context_type) {
+  keyword <- tolower(trimws(keyword))
+  row <- tryCatch(
+    .supa_get("keyword_context_weights",
+      list(keyword      = paste0("eq.", keyword),
+           context_type = paste0("eq.", context_type))),
+    error = function(e) data.frame()
+  )
+  if (nrow(row) == 0) return(NULL)
+  as.numeric(row$weight[1])
+}
+
 message("[db] Supabase database layer loaded ✅")
+message("[db] Validation evidence layer loaded ✅")

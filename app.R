@@ -4201,7 +4201,7 @@ server <- function(input, output, session) {
                                         tags$div(style=paste0("display:flex;gap:6px;padding:4px 6px;border-radius:4px;background:",hc,"0d;border-left:2px solid ",hc,";margin-bottom:3px;"),
                                           tags$div(style=paste0("font-size:10px;font-weight:700;color:",hc,";min-width:28px;"),paste0("L",h$ncic_level)),
                                           tags$div(style="flex:1;font-size:10px;color:#374151;line-height:1.4;",
-                                                   substr(h$tweet_text,1,100),if(nchar(h$tweet_text)>100)"..."else""),
+                                                   substr(h$tweet_text,1,100),if(!is.na(h$tweet_text)&&nchar(h$tweet_text)>100)"..."else""),
                                           tags$div(style="font-size:9px;color:#9ca3af;white-space:nowrap;",h$timestamp_chr%||%""))
                                       })))
                                   }
@@ -4595,7 +4595,7 @@ server <- function(input, output, session) {
                       }
                     })
            )
-      ),                                                             ← PASTE ENDS HERE
+      ),
       
       # ── Keyword Editor + Weights ───────────────────────────────
       
